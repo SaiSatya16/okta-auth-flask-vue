@@ -132,9 +132,16 @@ class UserProfileResource(Resource):
             if err:
                 return {"error": str(err)}, 400
             
-            # Get user's subscription
+            # Get user's subscription and other profile attributes
             subscription = user.profile.subscription if hasattr(user.profile, 'subscription') else "basic"
             source = user.profile.source if hasattr(user.profile, 'source') else "direct"
+            
+            # Get additional profile attributes if they exist
+            mobilePhone = user.profile.mobilePhone if hasattr(user.profile, 'mobilePhone') else ""
+            secondEmail = user.profile.secondEmail if hasattr(user.profile, 'secondEmail') else ""
+            city = user.profile.city if hasattr(user.profile, 'city') else ""
+            state = user.profile.state if hasattr(user.profile, 'state') else ""
+            countryCode = user.profile.countryCode if hasattr(user.profile, 'countryCode') else ""
             
             # Get available factors based on subscription
             available_factors = get_mfa_factors_by_subscription(subscription)
@@ -150,7 +157,12 @@ class UserProfileResource(Resource):
                     "lastName": user.profile.lastName,
                     "email": user.profile.email,
                     "subscription": subscription,
-                    "source": source
+                    "source": source,
+                    "mobilePhone": mobilePhone,
+                    "secondEmail": secondEmail,
+                    "city": city,
+                    "state": state,
+                    "countryCode": countryCode
                 },
                 "mfa": {
                     "available": available_factors,
@@ -161,7 +173,6 @@ class UserProfileResource(Resource):
             app.logger.error(f"Profile error: {str(e)}")
             return {"error": str(e)}, 400
 
-    
     @oidc.require_login
     def put(self):
         try:
@@ -181,6 +192,18 @@ class UserProfileResource(Resource):
                 }
             }
             
+            # Add additional fields if they are provided
+            if "mobilePhone" in data:
+                user_data["profile"]["mobilePhone"] = data.get("mobilePhone")
+            if "secondEmail" in data:
+                user_data["profile"]["secondEmail"] = data.get("secondEmail")
+            if "city" in data:
+                user_data["profile"]["city"] = data.get("city")
+            if "state" in data:
+                user_data["profile"]["state"] = data.get("state")
+            if "countryCode" in data:
+                user_data["profile"]["countryCode"] = data.get("countryCode")
+            
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             _, resp, err = loop.run_until_complete(
@@ -195,6 +218,7 @@ class UserProfileResource(Resource):
         except Exception as e:
             app.logger.error(f"Update exception: {str(e)}")
             return {"error": str(e)}, 400
+
 
 
 class MFAResource(Resource):

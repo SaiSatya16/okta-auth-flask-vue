@@ -1,5 +1,5 @@
 <template>
-  <div class="profile" v-if="profile">
+    <div class="profile" v-if="profile">
     <h1>Your Profile</h1>
     
     <div v-if="!editing">
@@ -8,12 +8,74 @@
         <p><strong>Email:</strong> {{ profile.email }}</p>
         <p><strong>Subscription:</strong> {{ profile.subscription }}</p>
         <p><strong>Source:</strong> {{ profile.source }}</p>
+        
+        <!-- Show additional details if they exist -->
+        <div v-if="hasAdditionalDetails" class="additional-details">
+          <h3>Additional Details</h3>
+          <p v-if="profile.mobilePhone"><strong>Mobile Phone:</strong> {{ profile.mobilePhone }}</p>
+          <p v-if="profile.secondEmail"><strong>Secondary Email:</strong> {{ profile.secondEmail }}</p>
+          <p v-if="profile.city"><strong>City:</strong> {{ profile.city }}</p>
+          <p v-if="profile.state"><strong>State:</strong> {{ profile.state }}</p>
+          <p v-if="profile.countryCode"><strong>Country Code:</strong> {{ profile.countryCode }}</p>
+        </div>
       </div>
       
-      <button @click="editing = true">Edit Profile</button>
+      <div class="action-buttons">
+        <button @click="editing = true" class="edit-button">Edit Profile</button>
+        <button @click="showAdditionalFields = !showAdditionalFields" class="details-button">
+          {{ showAdditionalFields ? 'Hide Additional Details' : 'Add More Details' }}
+        </button>
+      </div>
+      
+      <!-- Additional fields form when not in edit mode -->
+      <div v-if="showAdditionalFields && !editing" class="additional-fields-form slide-up">
+        <h3>Additional Details</h3>
+        <form @submit.prevent="updateAdditionalDetails">
+          <div class="form-group">
+            <label for="mobilePhone">Mobile Phone</label>
+            <input type="tel" id="mobilePhone" v-model="additionalDetails.mobilePhone">
+          </div>
+          
+          <div class="form-group">
+            <label for="secondEmail">Secondary Email</label>
+            <input type="email" id="secondEmail" v-model="additionalDetails.secondEmail">
+          </div>
+          
+          <div class="form-group">
+            <label for="city">City</label>
+            <input type="text" id="city" v-model="additionalDetails.city">
+          </div>
+          
+          <div class="form-group">
+            <label for="state">State</label>
+            <input type="text" id="state" v-model="additionalDetails.state">
+          </div>
+          
+          <div class="form-group">
+            <label for="countryCode">Country Code</label>
+            <select id="countryCode" v-model="additionalDetails.countryCode">
+              <option value="">Select Country</option>
+              <option value="US">United States</option>
+              <option value="CA">Canada</option>
+              <option value="UK">United Kingdom</option>
+              <option value="AU">Australia</option>
+              <option value="IN">India</option>
+              <!-- Add more countries as needed -->
+            </select>
+          </div>
+          
+          <div class="form-actions">
+            <button type="submit" :disabled="updatingDetails">
+              {{ updatingDetails ? 'Saving...' : 'Save Details' }}
+            </button>
+            <button type="button" @click="showAdditionalFields = false">Cancel</button>
+          </div>
+        </form>
+      </div>
     </div>
     
-    <form v-else @submit.prevent="updateProfile">
+    <!-- Main edit form -->
+    <form v-else @submit.prevent="updateProfile" class="edit-form">
       <div class="form-group">
         <label for="firstName">First Name</label>
         <input type="text" id="firstName" v-model="editForm.firstName">
@@ -24,9 +86,47 @@
         <input type="text" id="lastName" v-model="editForm.lastName">
       </div>
       
+      <!-- Include additional fields in the main edit form -->
+      <div class="additional-fields">
+        <h3>Additional Details</h3>
+        
+        <div class="form-group">
+          <label for="editMobilePhone">Mobile Phone</label>
+          <input type="tel" id="editMobilePhone" v-model="editForm.mobilePhone">
+        </div>
+        
+        <div class="form-group">
+          <label for="editsecondEmail">Secondary Email</label>
+          <input type="email" id="editsecondEmail" v-model="editForm.secondEmail">
+        </div>
+        
+        <div class="form-group">
+          <label for="editCity">City</label>
+          <input type="text" id="editCity" v-model="editForm.city">
+        </div>
+        
+        <div class="form-group">
+          <label for="editState">State</label>
+          <input type="text" id="editState" v-model="editForm.state">
+        </div>
+        
+        <div class="form-group">
+          <label for="editCountryCode">Country Code</label>
+          <select id="editCountryCode" v-model="editForm.countryCode">
+            <option value="">Select Country</option>
+            <option value="US">United States</option>
+            <option value="CA">Canada</option>
+            <option value="UK">United Kingdom</option>
+            <option value="AU">Australia</option>
+            <option value="IN">India</option>
+            <!-- Add more countries as needed -->
+          </select>
+        </div>
+      </div>
+      
       <div class="form-actions">
         <button type="submit" :disabled="updating">Save</button>
-        <button type="button" @click="editing = false">Cancel</button>
+        <button type="button" @click="cancelEdit">Cancel</button>
       </div>
     </form>
     
@@ -137,12 +237,37 @@ export default {
       editing: false,
       editForm: {
         firstName: '',
-        lastName: ''
+        lastName: '',
+        subscription: '',
+        mobilePhone: '',
+        secondEmail: '',
+        city: '',
+        state: '',
+        countryCode: ''
       },
+      additionalDetails: {
+        mobilePhone: '',
+        secondEmail: '',
+        city: '',
+        state: '',
+        countryCode: ''
+      },
+      showAdditionalFields: false,
       updating: false,
+      updatingDetails: false,
       enrolling: null,
       error: null,
       refreshingMfa: false,
+    }},
+    computed: {
+    hasAdditionalDetails() {
+      return this.profile && (
+        this.profile.mobilePhone || 
+        this.profile.secondEmail || 
+        this.profile.city || 
+        this.profile.state || 
+        this.profile.countryCode
+      );
     }
   },
   async created() {
@@ -151,12 +276,11 @@ export default {
       this.profile = response.data.profile;
       this.mfa = response.data.mfa;
       
-      // Initialize edit form
-      this.editForm = {
-        firstName: this.profile.firstName,
-        lastName: this.profile.lastName,
-        subscription: this.profile.subscription
-      };
+      // Initialize edit form with all fields
+      this.initializeEditForm();
+      
+      // Initialize additional details form
+      this.initializeAdditionalDetails();
     } catch (error) {
       this.error = 'Failed to load profile data';
       console.error(error);
@@ -170,16 +294,57 @@ export default {
       try {
         await api.updateProfile(this.editForm);
         
-        // Update local profile data
+        // Update local profile data with all fields
         this.profile.firstName = this.editForm.firstName;
         this.profile.lastName = this.editForm.lastName;
+        this.profile.subscription = this.editForm.subscription;
+        this.profile.mobilePhone = this.editForm.mobilePhone;
+        this.profile.secondEmail = this.editForm.secondEmail;
+        this.profile.city = this.editForm.city;
+        this.profile.state = this.editForm.state;
+        this.profile.countryCode = this.editForm.countryCode;
         
         // Exit edit mode
         this.editing = false;
+        toast.success('Profile updated successfully');
       } catch (error) {
         this.error = error.response?.data?.error || 'Failed to update profile';
+        toast.error(this.error);
       } finally {
         this.updating = false;
+      }
+    },
+    
+    async updateAdditionalDetails() {
+      this.updatingDetails = true;
+      this.error = null;
+      
+      try {
+        // Create an update object that includes only the additional details
+        const updateData = {
+          firstName: this.profile.firstName,
+          lastName: this.profile.lastName,
+          subscription: this.profile.subscription,
+          ...this.additionalDetails
+        };
+        
+        await api.updateProfile(updateData);
+        
+        // Update local profile data with additional details
+        this.profile.mobilePhone = this.additionalDetails.mobilePhone;
+        this.profile.secondEmail = this.additionalDetails.secondEmail;
+        this.profile.city = this.additionalDetails.city;
+        this.profile.state = this.additionalDetails.state;
+        this.profile.countryCode = this.additionalDetails.countryCode;
+        
+        // Hide the additional fields form
+        this.showAdditionalFields = false;
+        toast.success('Additional details updated successfully');
+      } catch (error) {
+        this.error = error.response?.data?.error || 'Failed to update additional details';
+        toast.error(this.error);
+      } finally {
+        this.updatingDetails = false;
       }
     },
     
@@ -267,7 +432,34 @@ export default {
       };
       
       return names[factor] || factor;
-    }
+    },
+
+    initializeEditForm() {
+      this.editForm = {
+        firstName: this.profile.firstName || '',
+        lastName: this.profile.lastName || '',
+        subscription: this.profile.subscription || 'basic',
+        mobilePhone: this.profile.mobilePhone || '',
+        secondEmail: this.profile.secondEmail || '',
+        city: this.profile.city || '',
+        state: this.profile.state || '',
+        countryCode: this.profile.countryCode || ''
+      };
+    },
+    
+    initializeAdditionalDetails() {
+      this.additionalDetails = {
+        mobilePhone: this.profile.mobilePhone || '',
+        secondEmail: this.profile.secondEmail || '',
+        city: this.profile.city || '',
+        state: this.profile.state || '',
+        countryCode: this.profile.countryCode || ''
+      };
+    },
+    cancelEdit() {
+      this.editing = false;
+      this.initializeEditForm();
+    },
   }
 }
 </script>
@@ -602,6 +794,72 @@ button:disabled {
 .badge-premium-plus {
   background-color: var(--accent-color);
   color: white;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.edit-button, .details-button {
+  padding: 0.8rem 1.5rem;
+  border-radius: 4px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.edit-button {
+  background-color: var(--primary-color);
+  color: white;
+  border: none;
+}
+
+.details-button {
+  background-color: var(--card-background);
+  color: var(--text-color);
+  border: 1px solid var(--border-color);
+}
+
+.edit-button:hover {
+  background-color: #3b78e7;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+.details-button:hover {
+  background-color: var(--hover-color);
+  transform: translateY(-2px);
+}
+
+.additional-fields-form {
+  background-color: var(--card-background);
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-top: 1rem;
+  margin-bottom: 2rem;
+  box-shadow: var(--shadow);
+}
+
+.additional-details {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border-color);
+}
+
+.additional-details h3 {
+  margin-bottom: 1rem;
+  color: var(--primary-color);
+}
+
+.slide-up {
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 </style>
 
