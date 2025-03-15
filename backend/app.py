@@ -12,8 +12,6 @@ from flask_session import Session
 load_dotenv()
 
 app = Flask(__name__)
-# Update your CORS configuration in app.py
-# Update your CORS configuration in app.py
 CORS(app, 
      supports_credentials=True, 
      origins=["http://localhost:8080", "http://localhost:5000"], 
@@ -27,8 +25,6 @@ CORS(app,
 api = Api(app)
 
 # Configure Okta
-# Check these settings in your app.py
-# Update these settings in your app.py
 app.config["OIDC_CLIENT_SECRETS"] = "client_secrets.json"
 app.config["OIDC_COOKIE_SECURE"] = False  # Set to True in production
 app.config["OIDC_CALLBACK_ROUTE"] = "/oidc/callback"
@@ -46,15 +42,11 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 Session(app)
 
-# Remove these problematic settings:
-# app.config["OIDC_COOKIE_DOMAIN"] = "localhost"
-# app.config["OIDC_COOKIE_PATH"] = "/"
-# app.config["OIDC_COOKIE_SAMESITE"] = "Lax"
 
 
 
 
-# Create client_secrets.json
+
 
 
 # Initialize OpenIDConnect
@@ -75,7 +67,6 @@ def get_mfa_factors_by_subscription(subscription):
     }
     return factors.get(subscription, ["oktaverify"])
 
-# In your backend/app.py file, modify the SignupResource class:
 
 class SignupResource(Resource):
     def post(self):
@@ -89,7 +80,8 @@ class SignupResource(Resource):
                 "email": data["email"],
                 "login": data["email"],
                 "subscription": data.get("subscription", "basic"),
-                "source": request.headers.get("Origin", "direct")
+                "source": request.headers.get("Origin", "direct"),
+                "appAccess": True
             }
             
             user_credentials = {
@@ -114,20 +106,7 @@ class SignupResource(Resource):
             if err:
                 return {"error": str(err)}, 400
             
-            # Add this code to assign the user to your application
-            app_id = os.getenv("OKTA_APP_ID")  # Add this to your .env file
-            assignment = {
-                "id": created_user.id,  # This is the user ID, not the app ID
-                "scope": "USER"
-            }
             
-            # Assign user to the application
-            _, _, err = loop.run_until_complete(
-                okta_client.assign_user_to_application(app_id, assignment)
-            )
-            
-            if err:
-                return {"error": f"User created but app assignment failed: {str(err)}"}, 400
                 
             return {"message": "User created successfully", "id": created_user.id}, 201
             
@@ -139,12 +118,17 @@ class SignupResource(Resource):
 class UserProfileResource(Resource):
     @oidc.require_login
     def get(self):
-        user_info = oidc.user_getinfo(["sub", "name", "email"])
-        okta_id = user_info.get("sub")
-        
         try:
+            user_info = oidc.user_getinfo(["sub", "name", "email"])
+            okta_id = user_info.get("sub")
+            
             # Get full user profile from Okta
-            user, resp, err = okta_client.get_user(okta_id)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            user, resp, err = loop.run_until_complete(
+                okta_client.get_user(okta_id)
+            )
+            
             if err:
                 return {"error": str(err)}, 400
             
@@ -174,42 +158,61 @@ class UserProfileResource(Resource):
                 }
             }
         except Exception as e:
+            app.logger.error(f"Profile error: {str(e)}")
             return {"error": str(e)}, 400
+
     
     @oidc.require_login
     def put(self):
-        data = request.get_json()
-        user_info = oidc.user_getinfo(["sub"])
-        okta_id = user_info.get("sub")
-        
         try:
+            data = request.get_json()
+            user_info = oidc.user_getinfo(["sub"])
+            okta_id = user_info.get("sub")
+            
             # Update user in Okta
             user_data = {
                 "profile": {
+                    "email": user_info.get("email"),
+                    "login": user_info.get("email"),
                     "firstName": data.get("firstName"),
                     "lastName": data.get("lastName"),
-                    "subscription": data.get("subscription")
+                    "subscription": data.get("subscription"),
+                    "appAccess": True
                 }
             }
             
-            _, resp, err = okta_client.update_user(okta_id, user_data)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            _, resp, err = loop.run_until_complete(
+                okta_client.update_user(okta_id, user_data)
+            )
+            
             if err:
+                app.logger.error(f"Update error: {str(err)}")
                 return {"error": str(err)}, 400
                 
             return {"message": "Profile updated successfully"}
         except Exception as e:
+            app.logger.error(f"Update exception: {str(e)}")
             return {"error": str(e)}, 400
+
 
 class MFAResource(Resource):
     @oidc.require_login
     def get(self):
-        user_info = oidc.user_getinfo(["sub"])
-        okta_id = user_info.get("sub")
-        
         try:
+            user_info = oidc.user_getinfo(["sub"])
+            okta_id = user_info.get("sub")
+            
             # Get user from Okta
-            user, resp, err = okta_client.get_user(okta_id)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            user, resp, err = loop.run_until_complete(
+                okta_client.get_user(okta_id)
+            )
+            
             if err:
+                app.logger.error(f"MFA get error: {str(err)}")
                 return {"error": str(err)}, 400
                 
             # Get subscription
@@ -226,7 +229,9 @@ class MFAResource(Resource):
                 "enrolled_factors": enrolled_factors
             }
         except Exception as e:
+            app.logger.error(f"MFA get exception: {str(e)}")
             return {"error": str(e)}, 400
+
     
     @oidc.require_login
     def post(self):
@@ -326,16 +331,20 @@ def oidc_callback():
 
 
 
-@app.route('/dashboard')
-@oidc.require_login
-def dashboard():
-    return redirect('http://localhost:8080/profile')
+@app.route('/')
+def index():
+    # Redirect to the frontend
+    return redirect('http://localhost:8080')
+
 
 
 @app.route('/logout')
 def logout():
-    oidc.logout()
-    return jsonify({"message": "Logged out successfully"})
+    # Clear the Flask session
+    session.clear()
+    # Redirect to Okta's logout endpoint with a post_logout_redirect_uri
+    return oidc.logout(return_to=url_for('index', _external=True))
+
 
 if __name__ == '__main__':
     app.run(debug=True)

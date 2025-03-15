@@ -13,8 +13,6 @@ from flask_session import Session
 load_dotenv()
 
 app = Flask(__name__)
-# Update your CORS configuration in app.py
-# Update your CORS configuration in app.py
 CORS(app, 
      supports_credentials=True, 
      origins=["http://localhost:8080", "http://localhost:5000"], 
@@ -28,8 +26,6 @@ CORS(app,
 api = Api(app)
 
 # Configure Okta
-# Check these settings in your app.py
-# Update these settings in your app.py
 app.config["OIDC_CLIENT_SECRETS"] = "client_secrets.json"
 app.config["OIDC_COOKIE_SECURE"] = False  # Set to True in production
 app.config["OIDC_CALLBACK_ROUTE"] = "/oidc/callback"
@@ -47,15 +43,11 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 Session(app)
 
-# Remove these problematic settings:
-# app.config["OIDC_COOKIE_DOMAIN"] = "localhost"
-# app.config["OIDC_COOKIE_PATH"] = "/"
-# app.config["OIDC_COOKIE_SAMESITE"] = "Lax"
 
 
 
 
-# Create client_secrets.json
+
 
 
 # Initialize OpenIDConnect
@@ -76,7 +68,6 @@ def get_mfa_factors_by_subscription(subscription):
     }
     return factors.get(subscription, ["oktaverify"])
 
-# In your backend/app.py file, modify the SignupResource class:
 
 class SignupResource(Resource):
     def post(self):
@@ -90,7 +81,8 @@ class SignupResource(Resource):
                 "email": data["email"],
                 "login": data["email"],
                 "subscription": data.get("subscription", "basic"),
-                "source": request.headers.get("Origin", "direct")
+                "source": request.headers.get("Origin", "direct"),
+                "appAccess": True
             }
             
             user_credentials = {
@@ -115,20 +107,7 @@ class SignupResource(Resource):
             if err:
                 return {"error": str(err)}, 400
             
-            # Add this code to assign the user to your application
-            app_id = os.getenv("OKTA_APP_ID")  # Add this to your .env file
-            assignment = {
-                "id": created_user.id,  # This is the user ID, not the app ID
-                "scope": "USER"
-            }
             
-            # Assign user to the application
-            _, _, err = loop.run_until_complete(
-                okta_client.assign_user_to_application(app_id, assignment)
-            )
-            
-            if err:
-                return {"error": f"User created but app assignment failed: {str(err)}"}, 400
                 
             return {"message": "User created successfully", "id": created_user.id}, 201
             
@@ -140,12 +119,17 @@ class SignupResource(Resource):
 class UserProfileResource(Resource):
     @oidc.require_login
     def get(self):
-        user_info = oidc.user_getinfo(["sub", "name", "email"])
-        okta_id = user_info.get("sub")
-        
         try:
+            user_info = oidc.user_getinfo(["sub", "name", "email"])
+            okta_id = user_info.get("sub")
+            
             # Get full user profile from Okta
-            user, resp, err = okta_client.get_user(okta_id)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            user, resp, err = loop.run_until_complete(
+                okta_client.get_user(okta_id)
+            )
+            
             if err:
                 return {"error": str(err)}, 400
             
@@ -175,42 +159,61 @@ class UserProfileResource(Resource):
                 }
             }
         except Exception as e:
+            app.logger.error(f"Profile error: {str(e)}")
             return {"error": str(e)}, 400
+
     
     @oidc.require_login
     def put(self):
-        data = request.get_json()
-        user_info = oidc.user_getinfo(["sub"])
-        okta_id = user_info.get("sub")
-        
         try:
+            data = request.get_json()
+            user_info = oidc.user_getinfo(["sub"])
+            okta_id = user_info.get("sub")
+            
             # Update user in Okta
             user_data = {
                 "profile": {
+                    "email": user_info.get("email"),
+                    "login": user_info.get("email"),
                     "firstName": data.get("firstName"),
                     "lastName": data.get("lastName"),
-                    "subscription": data.get("subscription")
+                    "subscription": data.get("subscription"),
+                    "appAccess": True
                 }
             }
             
-            _, resp, err = okta_client.update_user(okta_id, user_data)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            _, resp, err = loop.run_until_complete(
+                okta_client.update_user(okta_id, user_data)
+            )
+            
             if err:
+                app.logger.error(f"Update error: {str(err)}")
                 return {"error": str(err)}, 400
                 
             return {"message": "Profile updated successfully"}
         except Exception as e:
+            app.logger.error(f"Update exception: {str(e)}")
             return {"error": str(e)}, 400
+
 
 class MFAResource(Resource):
     @oidc.require_login
     def get(self):
-        user_info = oidc.user_getinfo(["sub"])
-        okta_id = user_info.get("sub")
-        
         try:
+            user_info = oidc.user_getinfo(["sub"])
+            okta_id = user_info.get("sub")
+            
             # Get user from Okta
-            user, resp, err = okta_client.get_user(okta_id)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            user, resp, err = loop.run_until_complete(
+                okta_client.get_user(okta_id)
+            )
+            
             if err:
+                app.logger.error(f"MFA get error: {str(err)}")
                 return {"error": str(err)}, 400
                 
             # Get subscription
@@ -227,7 +230,9 @@ class MFAResource(Resource):
                 "enrolled_factors": enrolled_factors
             }
         except Exception as e:
+            app.logger.error(f"MFA get exception: {str(e)}")
             return {"error": str(e)}, 400
+
     
     @oidc.require_login
     def post(self):
@@ -286,10 +291,15 @@ api.add_resource(LoginStatusResource, '/api/login-status')
 # In app.py, update your login route
 @app.route('/login')
 def login():
-    # Ensure the redirect URI matches exactly what's configured in Okta
-    redirect_uri = url_for('oidc_callback', _external=True)
-    return oidc.redirect_to_auth_server(redirect_uri=redirect_uri)
-
+    # Generate a secure state parameter
+    state = os.urandom(16).hex()
+    session['oauth_state'] = state
+    
+    # Include state in the authorization request
+    return oidc.redirect_to_auth_server(
+        redirect_uri=url_for('oidc_callback', _external=True),
+        state=state
+    )
 
 
 
@@ -322,16 +332,20 @@ def oidc_callback():
 
 
 
-@app.route('/dashboard')
-@oidc.require_login
-def dashboard():
-    return redirect('http://localhost:8080/profile')
+@app.route('/')
+def index():
+    # Redirect to the frontend
+    return redirect('http://localhost:8080')
+
 
 
 @app.route('/logout')
 def logout():
-    oidc.logout()
-    return jsonify({"message": "Logged out successfully"})
+    # Clear the Flask session
+    session.clear()
+    # Redirect to Okta's logout endpoint with a post_logout_redirect_uri
+    return oidc.logout(return_to=url_for('index', _external=True))
+
 
 if __name__ == '__main__':
     app.run(debug=True)
@@ -428,9 +442,18 @@ async created() {
 }
 ,
   methods: {
-    logout() {
-      window.location.href = 'http://localhost:5000/logout';
-    }
+    async logout() {
+  try {
+    // Clear any local state
+    this.$store.commit('SET_AUTH_STATUS', false);
+    this.$store.commit('SET_USER', null);
+    // Redirect to backend logout endpoint
+    window.location.href = 'http://localhost:5000/logout';
+  } catch (error) {
+    console.error('Logout error:', error);
+  }
+}
+
   }
 }
 </script>
@@ -497,7 +520,8 @@ router.beforeEach(async (to, from, next) => {
       const data = await response.json();
       
       if (!data.loggedIn) {
-        window.location.href = 'http://localhost:5000/login';
+        // Redirect to login page instead of directly to Okta
+        next('/login');
         return;
       }
       next();
@@ -735,259 +759,430 @@ async login() {
   
 // File: frontend/src/views/Profile.vue
 <template>
-    <div class="profile" v-if="profile">
-      <h1>Your Profile</h1>
-      
-      <div v-if="!editing">
-        <div class="profile-info">
-          <p><strong>Name:</strong> {{ profile.firstName }} {{ profile.lastName }}</p>
-          <p><strong>Email:</strong> {{ profile.email }}</p>
-          <p><strong>Subscription:</strong> {{ profile.subscription }}</p>
-          <p><strong>Source:</strong> {{ profile.source }}</p>
-        </div>
-        
-        <button @click="editing = true">Edit Profile</button>
+  <div class="profile" v-if="profile">
+    <h1>Your Profile</h1>
+    
+    <div v-if="!editing">
+      <div class="profile-info">
+        <p><strong>Name:</strong> {{ profile.firstName }} {{ profile.lastName }}</p>
+        <p><strong>Email:</strong> {{ profile.email }}</p>
+        <p><strong>Subscription:</strong> {{ profile.subscription }}</p>
+        <p><strong>Source:</strong> {{ profile.source }}</p>
       </div>
       
-      <form v-else @submit.prevent="updateProfile">
-        <div class="form-group">
-          <label for="firstName">First Name</label>
-          <input type="text" id="firstName" v-model="editForm.firstName">
-        </div>
-        
-        <div class="form-group">
-          <label for="lastName">Last Name</label>
-          <input type="text" id="lastName" v-model="editForm.lastName">
-        </div>
-        
-        <div class="form-group">
-          <label for="subscription">Subscription</label>
-          <select id="subscription" v-model="editForm.subscription">
-            <option value="basic">Basic</option>
-            <option value="premium">Premium</option>
-            <option value="premium+">Premium+</option>
-          </select>
-        </div>
-        
-        <div class="form-actions">
-          <button type="submit" :disabled="updating">Save</button>
-          <button type="button" @click="editing = false">Cancel</button>
-        </div>
-      </form>
+      <button @click="editing = true">Edit Profile</button>
+    </div>
+    
+    <form v-else @submit.prevent="updateProfile">
+      <div class="form-group">
+        <label for="firstName">First Name</label>
+        <input type="text" id="firstName" v-model="editForm.firstName">
+      </div>
       
-      <div class="mfa-section">
-        <h2>Multi-Factor Authentication</h2>
-        
-        <div v-if="mfa.available.length > 0">
-          <p>Available factors for your subscription:</p>
-          <ul>
-            <li v-for="factor in mfa.available" :key="factor">
-              {{ getFriendlyFactorName(factor) }}
-              <button 
-                v-if="!isFactorEnrolled(factor)" 
-                @click="enrollFactor(factor)"
-                :disabled="enrolling === factor"
-              >
-                {{ enrolling === factor ? 'Enrolling...' : 'Enroll' }}
-              </button>
-              <span v-else class="enrolled">Enrolled</span>
-            </li>
+      <div class="form-group">
+        <label for="lastName">Last Name</label>
+        <input type="text" id="lastName" v-model="editForm.lastName">
+      </div>
+      
+      <div class="form-actions">
+        <button type="submit" :disabled="updating">Save</button>
+        <button type="button" @click="editing = false">Cancel</button>
+      </div>
+    </form>
+    
+    <div class="subscription-section">
+      <h2>Subscription Management</h2>
+      <p>Your current subscription: <strong>{{ profile.subscription }}</strong></p>
+      
+      <div class="subscription-plans">
+        <div class="plan" :class="{ 'current': profile.subscription === 'basic' }">
+          <h3>Basic Plan</h3>
+          <p class="price">Free</p>
+          <ul class="benefits">
+            <li>Okta Verify authentication</li>
           </ul>
+          <button v-if="profile.subscription !== 'basic'" 
+                  @click="updateSubscription('basic')"
+                  :disabled="updating">
+            Select Plan
+          </button>
+          <span v-else class="current-plan">Current Plan</span>
         </div>
         
-        <div v-else>
-          <p>No MFA factors available for your subscription level.</p>
+        <div class="plan" :class="{ 'current': profile.subscription === 'premium' }">
+          <h3>Premium Plan</h3>
+          <p class="price">$10/month</p>
+          <ul class="benefits">
+            <li>Okta Verify authentication</li>
+            <li>Google Authenticator support</li>
+          </ul>
+          <button v-if="profile.subscription !== 'premium'" 
+                  @click="updateSubscription('premium')"
+                  :disabled="updating">
+            Upgrade Now
+          </button>
+          <span v-else class="current-plan">Current Plan</span>
+        </div>
+        
+        <div class="plan" :class="{ 'current': profile.subscription === 'premium+' }">
+          <h3>Premium+ Plan</h3>
+          <p class="price">$20/month</p>
+          <ul class="benefits">
+            <li>Okta Verify authentication</li>
+            <li>Google Authenticator support</li>
+            <li>Phone Authentication</li>
+          </ul>
+          <button v-if="profile.subscription !== 'premium+'" 
+                  @click="updateSubscription('premium+')"
+                  :disabled="updating">
+            Upgrade Now
+          </button>
+          <span v-else class="current-plan">Current Plan</span>
         </div>
       </div>
+    </div>
+    
+    <div class="mfa-section">
+      <h2>Multi-Factor Authentication</h2>
       
-      <div v-if="error" class="error">{{ error }}</div>
+      <div v-if="refreshingMfa" class="mfa-loading">
+        <p>Refreshing available MFA options...</p>
+        <div class="spinner"></div>
+      </div>
+      
+      <div v-else-if="mfa.available.length > 0">
+        <p>Available factors for your subscription:</p>
+        <ul>
+          <li v-for="factor in mfa.available" :key="factor">
+            {{ getFriendlyFactorName(factor) }}
+            <button 
+              v-if="!isFactorEnrolled(factor)" 
+              @click="enrollFactor(factor)"
+              :disabled="enrolling === factor"
+            >
+              {{ enrolling === factor ? 'Enrolling...' : 'Enroll' }}
+            </button>
+            <span v-else class="enrolled">Enrolled</span>
+          </li>
+        </ul>
+      </div>
+      
+      <div v-else>
+        <p>No MFA factors available for your subscription level.</p>
+      </div>
     </div>
-    <div v-else class="loading">
-      Loading profile...
-    </div>
-  </template>
-  
-  <script>
-  import api from '../services/api';
-  
-  export default {
-    name: 'ProfileView',
-    data() {
-      return {
-        profile: null,
-        mfa: {
-          available: [],
-          enrolled: []
-        },
-        editing: false,
-        editForm: {
-          firstName: '',
-          lastName: '',
-          subscription: ''
-        },
-        updating: false,
-        enrolling: null,
-        error: null
-      }
-    },
-    async created() {
+
+    <div v-if="error" class="error">{{ error }}</div>
+  </div>
+  <div v-else class="loading">
+    Loading profile...
+  </div>
+</template>
+
+<script>
+import api from '../services/api';
+
+export default {
+  name: 'ProfileView',
+  data() {
+    return {
+      profile: null,
+      mfa: {
+        available: [],
+        enrolled: []
+      },
+      editing: false,
+      editForm: {
+        firstName: '',
+        lastName: ''
+      },
+      updating: false,
+      enrolling: null,
+      error: null,
+      refreshingMfa: false,
+    }
+  },
+  async created() {
+    try {
+      const response = await api.getProfile();
+      this.profile = response.data.profile;
+      this.mfa = response.data.mfa;
+      
+      // Initialize edit form
+      this.editForm = {
+        firstName: this.profile.firstName,
+        lastName: this.profile.lastName,
+        subscription: this.profile.subscription
+      };
+    } catch (error) {
+      this.error = 'Failed to load profile data';
+      console.error(error);
+    }
+  },
+  methods: {
+    async updateProfile() {
+      this.updating = true;
+      this.error = null;
+      
       try {
-        const response = await api.getProfile();
-        this.profile = response.data.profile;
-        this.mfa = response.data.mfa;
+        await api.updateProfile(this.editForm);
         
-        // Initialize edit form
-        this.editForm = {
-          firstName: this.profile.firstName,
-          lastName: this.profile.lastName,
-          subscription: this.profile.subscription
-        };
+        // Update local profile data
+        this.profile.firstName = this.editForm.firstName;
+        this.profile.lastName = this.editForm.lastName;
+        
+        // Exit edit mode
+        this.editing = false;
       } catch (error) {
-        this.error = 'Failed to load profile data';
-        console.error(error);
+        this.error = error.response?.data?.error || 'Failed to update profile';
+      } finally {
+        this.updating = false;
       }
     },
-    methods: {
-      async updateProfile() {
-        this.updating = true;
-        this.error = null;
+    
+    async updateSubscription(newSubscription) {
+      this.updating = true;
+      this.error = null;
+      this.editForm = {
+        firstName: this.profile.firstName,
+        lastName: this.profile.lastName,
+        subscription: newSubscription
+      };
+      
+      try {
+        await api.updateProfile(this.editForm);
         
-        try {
-          await api.updateProfile(this.editForm);
-          
-          // Update local profile data
-          this.profile.firstName = this.editForm.firstName;
-          this.profile.lastName = this.editForm.lastName;
-          this.profile.subscription = this.editForm.subscription;
-          
-          // Exit edit mode
-          this.editing = false;
-          
-          // If subscription changed, refresh MFA options
+        // Update local profile data
+        this.profile.subscription = newSubscription;
+        
+        this.refreshingMfa = true;
+        // Add a small delay before refreshing MFA options to allow Okta to process the update
+        setTimeout(async () => {
           await this.refreshMfaOptions();
-        } catch (error) {
-          this.error = error.response?.data?.error || 'Failed to update profile';
-        } finally {
-          this.updating = false;
-        }
-      },
-      
-      async enrollFactor(factorType) {
-        this.enrolling = factorType;
-        this.error = null;
-        
-        try {
-          await api.enrollFactor(factorType);
-          
-          // Add to enrolled factors
-          this.mfa.enrolled.push(factorType);
-        } catch (error) {
-          this.error = error.response?.data?.error || `Failed to enroll in ${this.getFriendlyFactorName(factorType)}`;
-        } finally {
-          this.enrolling = null;
-        }
-      },
-      
-      async refreshMfaOptions() {
-        try {
-          const response = await api.getMfaFactors();
-          this.mfa.available = response.data.available_factors;
-        } catch (error) {
-          console.error('Failed to refresh MFA options:', error);
-        }
-      },
-      
-      isFactorEnrolled(factor) {
-        return this.mfa.enrolled.includes(factor);
-      },
-      
-      getFriendlyFactorName(factor) {
-        const names = {
-          'oktaverify': 'Okta Verify',
-          'google': 'Google Authenticator',
-          'phone': 'Phone Authentication'
-        };
-        
-        return names[factor] || factor;
+          this.refreshingMfa = false;
+        }, 1000);
+      } catch (error) {
+        this.error = error.response?.data?.error || 'Failed to update subscription';
+      } finally {
+        this.updating = false;
       }
+    },
+    
+    async enrollFactor(factorType) {
+      this.enrolling = factorType;
+      this.error = null;
+      
+      try {
+        await api.enrollFactor(factorType);
+        
+        // Add to enrolled factors
+        this.mfa.enrolled.push(factorType);
+      } catch (error) {
+        this.error = error.response?.data?.error || `Failed to enroll in ${this.getFriendlyFactorName(factorType)}`;
+      } finally {
+        this.enrolling = null;
+      }
+    },
+    
+    async refreshMfaOptions() {
+      this.error = null;
+      try {
+        // First check if user is still authenticated
+        const authStatus = await api.checkLoginStatus();
+        if (!authStatus.data.loggedIn) {
+          // Redirect to login if not authenticated
+          window.location.href = 'http://localhost:5000/login';
+          return;
+        }
+        
+        const response = await api.getMfaFactors();
+        this.mfa.available = response.data.available_factors;
+        this.mfa.enrolled = response.data.enrolled_factors || [];
+      } catch (error) {
+        console.error('Failed to refresh MFA options:', error);
+        if (error.response && error.response.status === 400) {
+          // If session expired, redirect to login
+          if (error.response.data.error && error.response.data.error.includes('session')) {
+            window.location.href = 'http://localhost:5000/login';
+            return;
+          }
+          this.error = 'Failed to load MFA options. Please try logging in again.';
+        }
+      }
+    },
+    
+    isFactorEnrolled(factor) {
+      return this.mfa.enrolled.includes(factor);
+    },
+    
+    getFriendlyFactorName(factor) {
+      const names = {
+        'oktaverify': 'Okta Verify',
+        'google': 'Google Authenticator',
+        'phone': 'Phone Authentication'
+      };
+      
+      return names[factor] || factor;
     }
   }
-  </script>
-  
-  <style scoped>
-  .profile {
-    max-width: 800px;
-    margin: 0 auto;
-    padding: 20px;
-  }
-  
-  .profile-info {
-    margin-bottom: 20px;
-    padding: 15px;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-  }
-  
-  .form-group {
-    margin-bottom: 15px;
-  }
-  
-  .form-group label {
-    display: block;
-    margin-bottom: 5px;
-  }
-  
-  .form-group input,
-  .form-group select {
-    width: 100%;
-    padding: 8px;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-  }
-  
-  .form-actions {
-    margin-top: 20px;
-  }
-  
-  button {
-    padding: 8px 16px;
-    background-color: #4285f4;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    margin-right: 10px;
-  }
-  
-  button:disabled {
-    background-color: #cccccc;
-    cursor: not-allowed;
-  }
-  
-  .mfa-section {
-    margin-top: 30px;
-    padding: 15px;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-  }
-  
-  .enrolled {
-    color: green;
-    font-weight: bold;
-    margin-left: 10px;
-  }
-  
-  .error {
-    color: red;
-    margin-top: 15px;
-  }
-  
-  .loading {
-    text-align: center;
-    padding: 30px;
-  }
-  </style>
-  
+}
+</script>
+
+<style scoped>
+.profile {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.profile-info {
+  margin-bottom: 20px;
+  padding: 15px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 5px;
+}
+
+.form-group input,
+.form-group select {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.form-actions {
+  margin-top: 20px;
+}
+
+button {
+  padding: 8px 16px;
+  background-color: #4285f4;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-right: 10px;
+}
+
+button:disabled {
+  background-color: #cccccc;
+  cursor: not-allowed;
+}
+
+.mfa-section {
+  margin-top: 30px;
+  padding: 15px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.enrolled {
+  color: green;
+  font-weight: bold;
+  margin-left: 10px;
+}
+
+.error {
+  color: red;
+  margin-top: 15px;
+}
+
+.loading {
+  text-align: center;
+  padding: 30px;
+}
+
+.mfa-loading {
+  text-align: center;
+  padding: 20px;
+}
+
+.spinner {
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #3498db;
+  border-radius: 50%;
+  width: 30px;
+  height: 30px;
+  animation: spin 2s linear infinite;
+  margin: 10px auto;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.subscription-section {
+  margin-top: 30px;
+  padding: 15px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.subscription-plans {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin-top: 20px;
+}
+
+.plan {
+  flex: 1;
+  min-width: 200px;
+  padding: 20px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  text-align: center;
+  transition: all 0.3s ease;
+}
+
+.plan:hover {
+  box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+}
+
+.plan.current {
+  border-color: #4285f4;
+  background-color: rgba(66, 133, 244, 0.05);
+}
+
+.plan h3 {
+  margin-top: 0;
+}
+
+.price {
+  font-size: 1.2em;
+  font-weight: bold;
+  color: #4285f4;
+}
+
+.benefits {
+  text-align: left;
+  margin: 20px 0;
+  padding-left: 20px;
+}
+
+.benefits li {
+  margin-bottom: 10px;
+}
+
+.current-plan {
+  display: inline-block;
+  padding: 8px 16px;
+  background-color: #4285f4;
+  color: white;
+  border-radius: 4px;
+}
+</style>
+
 // File: frontend/src/views/Signup.vue
 <template>
     <div class="signup">
@@ -1013,14 +1208,6 @@ async login() {
           <input type="password" id="password" v-model="user.password" required>
         </div>
         
-        <div class="form-group">
-          <label for="subscription">Subscription</label>
-          <select id="subscription" v-model="user.subscription">
-            <option value="basic">Basic</option>
-            <option value="premium">Premium</option>
-            <option value="premium+">Premium+</option>
-          </select>
-        </div>
         
         <button type="submit" :disabled="loading">
           {{ loading ? 'Creating Account...' : 'Sign Up' }}
@@ -1068,35 +1255,35 @@ async login() {
   </script>
   
 // File: frontend/vue.config.js
-// const { defineConfig } = require('@vue/cli-service')
-// module.exports = defineConfig({
-//   transpileDependencies: true
-// })
+const { defineConfig } = require('@vue/cli-service')
+module.exports = defineConfig({
+  transpileDependencies: true
+})
 
 // In vue.config.js
-module.exports = {
-  devServer: {
-    proxy: {
-      '/api': {
-        target: 'http://localhost:5000',
-        changeOrigin: true
-      },
-      '/login': {
-        target: 'http://localhost:5000',
-        changeOrigin: true
-      },
-      '/oidc': {
-        target: 'http://localhost:5000',
-        changeOrigin: true
-      },
-      '/logout': {
-        target: 'http://localhost:5000',
-        changeOrigin: true
-      }
-    }
-  }
-}
-//file: client_secrets.json:
+// module.exports = {
+//   devServer: {
+//     proxy: {
+//       '/api': {
+//         target: 'http://localhost:5000',
+//         changeOrigin: true
+//       },
+//       '/login': {
+//         target: 'http://localhost:5000',
+//         changeOrigin: true
+//       },
+//       '/oidc': {
+//         target: 'http://localhost:5000',
+//         changeOrigin: true
+//       },
+//       '/logout': {
+//         target: 'http://localhost:5000',
+//         changeOrigin: true
+//       }
+//     }
+//   }
+// }
+// file : client_secrets.json:
 {
     "web": {
       "client_id": "0oans21pydLssT0Zi5d7",

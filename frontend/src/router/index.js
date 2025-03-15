@@ -46,7 +46,8 @@ router.beforeEach(async (to, from, next) => {
       const data = await response.json();
       
       if (!data.loggedIn) {
-        window.location.href = 'http://localhost:5000/login';
+        // Redirect to login page instead of directly to Okta
+        next('/login');
         return;
       }
       next();
