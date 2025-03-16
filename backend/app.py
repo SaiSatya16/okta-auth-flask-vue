@@ -266,8 +266,13 @@ class MFAResource(Resource):
         factor_type = data.get("factor_type")
         
         try:
-            # Get user from Okta
-            user, resp, err = okta_client.get_user(okta_id)
+            # Get user from Okta using asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            user, resp, err = loop.run_until_complete(
+                okta_client.get_user(okta_id)
+            )
+            
             if err:
                 return {"error": str(err)}, 400
                 
