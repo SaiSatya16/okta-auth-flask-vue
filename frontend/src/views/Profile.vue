@@ -1,5 +1,5 @@
 <template>
-    <div class="profile" v-if="profile">
+  <div class="profile" v-if="profile">
     <h1>Your Profile</h1>
     
     <div v-if="!editing">
@@ -170,7 +170,7 @@
           <ul class="benefits">
             <li>Okta Verify authentication</li>
             <li>Google Authenticator support</li>
-            <li>Phone Authentication</li>
+            <li>Security Question Authentication</li>
           </ul>
           <button v-if="profile.subscription !== 'premium+'" 
                   @click="updateSubscription('premium+')"
@@ -189,39 +189,97 @@
         <p>Refreshing available MFA options...</p>
         <div class="spinner"></div>
       </div>
-      
-      <div v-else-if="mfa.available.length > 0">
-        <p>Available factors for your subscription:</p>
-        <ul>
-          <li v-for="factor in mfa.available" :key="factor">
-            {{ getFriendlyFactorName(factor) }}
-            <button 
-              v-if="!isFactorEnrolled(factor)" 
-              @click="enrollFactor(factor)"
-              :disabled="enrolling === factor"
-            >
-              {{ enrolling === factor ? 'Enrolling...' : 'Enroll' }}
-            </button>
-            <span v-else class="enrolled">Enrolled</span>
-          </li>
-        </ul>
-      </div>
-      
       <div v-else>
-        <p>No MFA factors available for your subscription level.</p>
+        <div v-if="mfa.supported_factors && mfa.supported_factors.length > 0">
+          <p>Available factors:</p>
+          <ul>
+            <li v-for="factor in mfa.supported_factors" :key="factor.name">
+              {{ getFriendlyFactorName(factor.name) }}
+              <button 
+                v-if="!factor.enrolled" 
+                @click="enrollFactor(factor.name)"
+                :disabled="enrolling === factor.name"
+              >
+                {{ enrolling === factor.name ? 'Enrolling...' : 'Enroll' }}
+              </button>
+              <span v-else class="enrolled">Enrolled</span>
+            </li>
+          </ul>
+        </div>
+        <div v-else-if="mfa.supported_factors === undefined || mfa.supported_factors.length === 0">
+          <p>No MFA factors available.</p>
+        </div>
       </div>
     </div>
-
+    
     <div v-if="error" class="error">{{ error }}</div>
   </div>
   <LoadingSpinner v-else message="Loading profile..." />
 
+  <!-- Security Question Modal -->
+  <div v-if="showSecurityQuestionModal" class="modal-overlay">
+    <div class="security-question-modal">
+      <h3>Set Up Security Question</h3>
+      
+      <div v-if="securityQuestions && securityQuestions.length > 0">
+        <div class="form-group">
+          <label for="securityQuestion">Select a security question:</label>
+          <select id="securityQuestion" v-model="selectedQuestion">
+            <option value="">Choose a question</option>
+            <option v-for="q in securityQuestions" :key="q.question" :value="q.question">
+              {{ q.questionText }}
+            </option>
+          </select>
+        </div>
+        
+        <div class="form-group">
+          <label for="securityAnswer">Your answer:</label>
+          <input 
+            type="text" 
+            id="securityAnswer" 
+            v-model="securityAnswer" 
+            placeholder="Enter your answer"
+          >
+        </div>
+        
+        <div v-if="questionError" class="error-message">
+          {{ questionError }}
+        </div>
+        
+        <div class="modal-actions">
+          <button 
+            @click="submitSecurityQuestion" 
+            :disabled="!selectedQuestion || !securityAnswer"
+          >
+            Submit
+          </button>
+          <button 
+            @click="cancelSecurityQuestion" 
+            type="button"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+      
+      <div v-else-if="securityQuestions && securityQuestions.length === 0">
+        <p>No security questions are available.</p>
+        <button @click="cancelSecurityQuestion">Close</button>
+      </div>
+      
+      <div v-else class="loading">
+        <p>Loading security questions...</p>
+        <div class="spinner"></div>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script>
 import api from '../services/api';
 import toast from '../services/toast';
 import LoadingSpinner from '../views/LoadingSpinner.vue';
+
 export default {
   name: 'ProfileView',
   components: {
@@ -231,8 +289,8 @@ export default {
     return {
       profile: null,
       mfa: {
-        available: [],
-        enrolled: []
+        supported_factors: [],
+        enrolled_factors: []
       },
       editing: false,
       editForm: {
@@ -258,8 +316,14 @@ export default {
       enrolling: null,
       error: null,
       refreshingMfa: false,
-    }},
-    computed: {
+      showSecurityQuestionModal: false,
+      securityQuestions: null,
+      selectedQuestion: '',
+      securityAnswer: '',
+      questionError: ''
+    }
+  },
+  computed: {
     hasAdditionalDetails() {
       return this.profile && (
         this.profile.mobilePhone || 
@@ -273,8 +337,10 @@ export default {
   async created() {
     try {
       const response = await api.getProfile();
+      const mfaresponse = await api.getMfaFactors();
       this.profile = response.data.profile;
-      this.mfa = response.data.mfa;
+      this.mfa.supported_factors = mfaresponse.data.supported_factors;
+      this.mfa.enrolled_factors = mfaresponse.data.enrolled_factors || [];
       
       // Initialize edit form with all fields
       this.initializeEditForm();
@@ -377,20 +443,73 @@ export default {
       }
     },
     
-    async enrollFactor(factorType) {
-      this.enrolling = factorType;
+    async enrollFactor(name) {
+      this.enrolling = name;
       this.error = null;
       
+      if (name === 'question') {
+        // Show security question modal
+        this.showSecurityQuestionModal = true;
+        // Fetch available security questions
+        await this.fetchSecurityQuestions();
+      } else {
+        try {
+          await api.enrollFactor(name);
+          toast.success(`Enrolled in ${this.getFriendlyFactorName(name)} successfully`);
+          // Refresh MFA options after enrolling
+          await this.refreshMfaOptions();
+        } catch (error) {
+          this.error = error.response?.data?.error || `Failed to enroll in ${this.getFriendlyFactorName(name)}`;
+        } finally {
+          this.enrolling = null;
+        }
+      }
+    },
+    
+    async fetchSecurityQuestions() {
       try {
-        await api.enrollFactor(factorType);
-        
-        // Add to enrolled factors
-        this.mfa.enrolled.push(factorType);
+        const response = await api.getSecurityQuestions();
+        this.securityQuestions = response.data;
       } catch (error) {
-        this.error = error.response?.data?.error || `Failed to enroll in ${this.getFriendlyFactorName(factorType)}`;
+        this.error = error.response?.data?.error || 'Failed to load security questions';
+        this.showSecurityQuestionModal = false;
+      }
+    },
+    
+    async submitSecurityQuestion() {
+      try {
+        if (!this.selectedQuestion || !this.securityAnswer) {
+          this.questionError = 'Please select a question and provide an answer';
+          return;
+        }
+        
+        await api.enrollFactor('question', {
+          factor_type: 'question',
+          question: this.selectedQuestion,
+          answer: this.securityAnswer
+        });
+        
+        toast.success('Security question enrolled successfully');
+        this.showSecurityQuestionModal = false;
+        this.selectedQuestion = '';
+        this.securityAnswer = '';
+        this.questionError = '';
+        
+        // Refresh MFA options after enrolling
+        await this.refreshMfaOptions();
+      } catch (error) {
+        this.questionError = error.response?.data?.error || 'Failed to enroll security question';
       } finally {
         this.enrolling = null;
       }
+    },
+    
+    cancelSecurityQuestion() {
+      this.showSecurityQuestionModal = false;
+      this.selectedQuestion = '';
+      this.securityAnswer = '';
+      this.questionError = '';
+      this.enrolling = null;
     },
     
     async refreshMfaOptions() {
@@ -400,13 +519,14 @@ export default {
         const authStatus = await api.checkLoginStatus();
         if (!authStatus.data.loggedIn) {
           // Redirect to login if not authenticated
+
           window.location.href = 'http://localhost:5000/login';
           return;
         }
         
         const response = await api.getMfaFactors();
-        this.mfa.available = response.data.available_factors;
-        this.mfa.enrolled = response.data.enrolled_factors || [];
+        this.mfa.supported_factors = response.data.supported_factors;
+        this.mfa.enrolled_factors = response.data.enrolled_factors || [];
       } catch (error) {
         console.error('Failed to refresh MFA options:', error);
         if (error.response && error.response.status === 400) {
@@ -420,20 +540,20 @@ export default {
       }
     },
     
-    isFactorEnrolled(factor) {
-      return this.mfa.enrolled.includes(factor);
-    },
+    // isFactorEnrolled(factorType) {
+    //   return this.mfa.enrolled_factors.includes(factorType);
+    // },
     
-    getFriendlyFactorName(factor) {
+    getFriendlyFactorName(factorType) {
       const names = {
-        'oktaverify': 'Okta Verify',
-        'google': 'Google Authenticator',
-        'phone': 'Phone Authentication'
+        'question': 'Security Question',
+        'OKTA': 'Okta Verify',
+        'GOOGLE': 'Google Authenticator'
       };
       
-      return names[factor] || factor;
+      return names[factorType] || factorType;
     },
-
+    
     initializeEditForm() {
       this.editForm = {
         firstName: this.profile.firstName || '',
@@ -540,7 +660,7 @@ h2 {
 .form-group select:focus {
   outline: none;
   border-color: var(--primary-color);
-  box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.2);
+  box-shadow: 0 0 0 2px rgba(66,133, 244, 0.2);
 }
 
 .form-actions {
@@ -860,6 +980,46 @@ button:disabled {
 @keyframes slideUp {
   from { opacity: 0; transform: translateY(20px); }
   to { opacity: 1; transform: translateY(0); }
+}
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.security-question-modal {
+  background-color: var(--card-background);
+  border-radius: 8px;
+  padding: 2rem;
+  width: 90%;
+  max-width: 500px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.security-question-modal h3 {
+  margin-top: 0;
+  color: var(--primary-color);
+  margin-bottom: 1.5rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.error-message {
+  color: var(--accent-color);
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
 }
 </style>
 

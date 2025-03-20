@@ -13,9 +13,9 @@ from flask_session import Session
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, 
-     supports_credentials=True, 
-     origins=["http://localhost:8080", "http://localhost:5000"], 
+CORS(app,
+     supports_credentials=True,
+     origins=["http://localhost:8080", "http://localhost:5000"],
      allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
      expose_headers=["Content-Type", "Authorization"],
      allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
@@ -48,177 +48,427 @@ Session(app)
 
 
 
-
+import ssl
+from okta.request_executor import RequestExecutor
 
 # Initialize OpenIDConnect
 oidc = OpenIDConnect(app)
 
-# Initialize Okta Client
+ 
+
+import requests
+
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+# Disable SSL warnings
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+
+# Patch the requests session
+
+old_init = requests.Session.__init__
+
+ 
+
+def new_init(self, *args, **kwargs):
+
+    old_init(self, *args, **kwargs)
+
+    self.verify = False
+
+ 
+
+requests.Session.__init__ = new_init
+
+ 
+
+# Initialize Okta Client normally
+
 okta_client = OktaClient({
+
     'orgUrl': os.getenv("OKTA_ORG_URL"),
+
     'token': os.getenv("OKTA_API_TOKEN")
+
 })
 
-# Helper functions
-def get_mfa_factors_by_subscription(subscription):
-    factors = {
-        "basic": ["oktaverify"],
-        "premium": ["oktaverify", "google"],
-        "premium+": ["oktaverify", "phone", "google"]
-    }
-    return factors.get(subscription, ["oktaverify"])
 
+
+
+# Helper functions
+
+# def get_mfa_factors_by_subscription(subscription):
+
+#     factors = {
+
+#         "basic": ["oktaverify"],
+
+#         "premium": ["oktaverify", "google"],
+
+#         "premium+": ["oktaverify", "securityquestion", "google"]
+
+#     }
+
+#     return factors.get(subscription, ["oktaverify"])
+
+ 
 
 class SignupResource(Resource):
+
     def post(self):
+
         data = request.get_json()
-        
+
+       
+
         try:
-            # Create user in Okta
+
+            # Create user in Okta using direct requests
+
             user_profile = {
+
                 "firstName": data["firstName"],
+
                 "lastName": data["lastName"],
+
                 "email": data["email"],
+
                 "login": data["email"],
+
                 "subscription": data.get("subscription", "basic"),
-                "source": request.headers.get("Origin", "direct"),
+
+                # "source": request.headers.get("Origin", "direct"),
+
                 "appAccess": True
+
             }
-            
+
+           
+
             user_credentials = {
+
                 "password": {"value": data["password"]}
+
             }
-            
+
+           
+
             user = {
+
                 "profile": user_profile,
+
                 "credentials": user_credentials
+
             }
-            
-            # Pass activate as a query parameter
-            query_params = {"activate": "true"}
-            
-            # Use asyncio to run the coroutine
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            created_user, resp, err = loop.run_until_complete(
-                okta_client.create_user(user, query_params)
+
+           
+
+            # Prepare the request
+
+            okta_url = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users"
+
+            headers = {
+
+                "Accept": "application/json",
+
+                "Content-Type": "application/json",
+
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+
+            }
+
+            params = {"activate": "true"}
+
+           
+
+            # Make the request with SSL verification disabled
+
+            response = requests.post(
+
+                okta_url,
+
+                headers=headers,
+
+                params=params,
+
+                json=user,
+
+                verify=False
+
             )
-            
-            if err:
-                return {"error": str(err)}, 400
-            
-            
-                
-            return {"message": "User created successfully", "id": created_user.id}, 201
-            
+
+           
+
+            if response.status_code >= 400:
+
+                return {"error": response.json()}, response.status_code
+
+           
+
+            created_user = response.json()
+
+            return {"message": "User created successfully", "id": created_user["id"]}, 201
+
+           
+
         except Exception as e:
+
             return {"error": str(e)}, 400
+
+
 
 
 
 class UserProfileResource(Resource):
-    @oidc.require_login
-    def get(self):
-        try:
-            user_info = oidc.user_getinfo(["sub", "name", "email"])
-            okta_id = user_info.get("sub")
-            
-            # Get full user profile from Okta
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            user, resp, err = loop.run_until_complete(
-                okta_client.get_user(okta_id)
-            )
-            
-            if err:
-                return {"error": str(err)}, 400
-            
-            # Get user's subscription and other profile attributes
-            subscription = user.profile.subscription if hasattr(user.profile, 'subscription') else "basic"
-            source = user.profile.source if hasattr(user.profile, 'source') else "direct"
-            
-            # Get additional profile attributes if they exist
-            mobilePhone = user.profile.mobilePhone if hasattr(user.profile, 'mobilePhone') else ""
-            secondEmail = user.profile.secondEmail if hasattr(user.profile, 'secondEmail') else ""
-            city = user.profile.city if hasattr(user.profile, 'city') else ""
-            state = user.profile.state if hasattr(user.profile, 'state') else ""
-            countryCode = user.profile.countryCode if hasattr(user.profile, 'countryCode') else ""
-            
-            # Get available factors based on subscription
-            available_factors = get_mfa_factors_by_subscription(subscription)
-            
-            # Get enrolled factors
-            enrolled_factors = []
-            # In a real implementation, you would get enrolled factors from Okta API
-            
-            return {
-                "profile": {
-                    "id": okta_id,
-                    "firstName": user.profile.firstName,
-                    "lastName": user.profile.lastName,
-                    "email": user.profile.email,
-                    "subscription": subscription,
-                    "source": source,
-                    "mobilePhone": mobilePhone,
-                    "secondEmail": secondEmail,
-                    "city": city,
-                    "state": state,
-                    "countryCode": countryCode
-                },
-                "mfa": {
-                    "available": available_factors,
-                    "enrolled": enrolled_factors
-                }
-            }
-        except Exception as e:
-            app.logger.error(f"Profile error: {str(e)}")
-            return {"error": str(e)}, 400
 
     @oidc.require_login
-    def put(self):
+
+    def get(self):
+
         try:
-            data = request.get_json()
-            user_info = oidc.user_getinfo(["sub"])
+
+            user_info = oidc.user_getinfo(["sub", "name", "email"])
+
             okta_id = user_info.get("sub")
-            
-            # Update user in Okta
-            user_data = {
-                "profile": {
-                    "email": user_info.get("email"),
-                    "login": user_info.get("email"),
-                    "firstName": data.get("firstName"),
-                    "lastName": data.get("lastName"),
-                    "subscription": data.get("subscription"),
-                    "appAccess": True
-                }
+
+           
+
+            # Get full user profile from Okta using direct requests
+
+            okta_url = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}"
+
+            headers = {
+
+                "Accept": "application/json",
+
+                "Content-Type": "application/json",
+
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+
             }
-            
-            # Add additional fields if they are provided
-            if "mobilePhone" in data:
-                user_data["profile"]["mobilePhone"] = data.get("mobilePhone")
-            if "secondEmail" in data:
-                user_data["profile"]["secondEmail"] = data.get("secondEmail")
-            if "city" in data:
-                user_data["profile"]["city"] = data.get("city")
-            if "state" in data:
-                user_data["profile"]["state"] = data.get("state")
-            if "countryCode" in data:
-                user_data["profile"]["countryCode"] = data.get("countryCode")
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            _, resp, err = loop.run_until_complete(
-                okta_client.update_user(okta_id, user_data)
+
+           
+
+            # Make the request with SSL verification disabled
+
+            response = requests.get(
+
+                okta_url,
+
+                headers=headers,
+
+                verify=False
+
             )
-            
-            if err:
-                app.logger.error(f"Update error: {str(err)}")
-                return {"error": str(err)}, 400
-                
-            return {"message": "Profile updated successfully"}
+
+           
+
+            if response.status_code >= 400:
+
+                return {"error": response.json()}, response.status_code
+
+           
+
+            user_data = response.json()
+
+           
+
+            # Get user's subscription and other profile attributes
+
+            profile = user_data.get("profile", {})
+
+            subscription = profile.get("subscription", "basic")
+
+            source = profile.get("source", "direct")
+
+           
+
+            # Get additional profile attributes if they exist
+
+            mobilePhone = profile.get("mobilePhone", "")
+
+            secondEmail = profile.get("secondEmail", "")
+
+            city = profile.get("city", "")
+
+            state = profile.get("state", "")
+
+            countryCode = profile.get("countryCode", "")
+
+           
+
+            # Get available factors based on subscription
+
+            # available_factors = get_mfa_factors_by_subscription(subscription)
+
+           
+
+            # Get enrolled factors
+
+            # enrolled_factors = []
+
+            # In a real implementation, you would get enrolled factors from Okta API
+
+           
+
+            return {
+
+                "profile": {
+
+                    "id": okta_id,
+
+                    "firstName": profile.get("firstName", ""),
+
+                    "lastName": profile.get("lastName", ""),
+
+                    "email": profile.get("email", ""),
+
+                    "subscription": subscription,
+
+                    "source": source,
+
+                    "mobilePhone": mobilePhone,
+
+                    "secondEmail": secondEmail,
+
+                    "city": city,
+
+                    "state": state,
+
+                    "countryCode": countryCode
+
+                },
+
+                # "mfa": {
+
+                #     "available": available_factors,
+
+                #     "enrolled": enrolled_factors
+
+                # }
+
+            }
+
         except Exception as e:
-            app.logger.error(f"Update exception: {str(e)}")
+
+            app.logger.error(f"Profile error: {str(e)}")
+
             return {"error": str(e)}, 400
+
+ 
+
+    @oidc.require_login
+
+    def put(self):
+
+        try:
+
+            data = request.get_json()
+
+            user_info = oidc.user_getinfo(["sub", "email"])
+
+            okta_id = user_info.get("sub")
+
+           
+
+            # Update user in Okta using direct requests
+
+            user_data = {
+
+                "profile": {
+
+                    "email": user_info.get("email"),
+
+                    "login": user_info.get("email"),
+
+                    "firstName": data.get("firstName"),
+
+                    "lastName": data.get("lastName"),
+
+                    "subscription": data.get("subscription"),
+
+                    "appAccess": True
+
+                }
+
+            }
+
+           
+
+            # Add additional fields if they are provided
+
+            if "mobilePhone" in data:
+
+                user_data["profile"]["mobilePhone"] = data.get("mobilePhone")
+
+            if "secondEmail" in data:
+
+                user_data["profile"]["secondEmail"] = data.get("secondEmail")
+
+            if "city" in data:
+
+                user_data["profile"]["city"] = data.get("city")
+
+            if "state" in data:
+
+                user_data["profile"]["state"] = data.get("state")
+
+            if "countryCode" in data:
+
+                user_data["profile"]["countryCode"] = data.get("countryCode")
+
+           
+
+            # Prepare the request
+
+            okta_url = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}"
+
+            headers = {
+
+                "Accept": "application/json",
+
+                "Content-Type": "application/json",
+
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+
+            }
+
+           
+
+            # Make the request with SSL verification disabled
+
+            response = requests.post(
+
+                okta_url,
+
+                headers=headers,
+
+                json=user_data,
+
+                verify=False
+
+            )
+
+           
+
+            if response.status_code >= 400:
+
+                app.logger.error(f"Update error: {response.json()}")
+
+                return {"error": response.json()}, response.status_code
+
+               
+
+            return {"message": "Profile updated successfully"}
+
+        except Exception as e:
+
+            app.logger.error(f"Update exception: {str(e)}")
+
+            return {"error": str(e)}, 400
+
+
 
 
 
@@ -229,61 +479,100 @@ class MFAResource(Resource):
             user_info = oidc.user_getinfo(["sub"])
             okta_id = user_info.get("sub")
             
-            # Get user from Okta
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            user, resp, err = loop.run_until_complete(
-                okta_client.get_user(okta_id)
-            )
+            # List all supported factors
+            okta_url_supported = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}/factors/catalog"
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+            }
+            response_supported = requests.get(okta_url_supported, headers=headers, verify=False)
             
-            if err:
-                app.logger.error(f"MFA get error: {str(err)}")
-                return {"error": str(err)}, 400
-                
-            # Get subscription
-            subscription = user.profile.subscription if hasattr(user.profile, 'subscription') else "basic"
+            if response_supported.status_code >= 400:
+                return {"error": response_supported.json()}, response_supported.status_code
             
-            # Get available factors based on subscription
-            available_factors = get_mfa_factors_by_subscription(subscription)
+            supported_factors = response_supported.json()
             
-            # Get enrolled factors (simplified)
-            enrolled_factors = []
+            # List all enrolled factors
+            okta_url_enrolled = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}/factors"
+            response_enrolled = requests.get(okta_url_enrolled, headers=headers, verify=False)
             
-            return {
-                "available_factors": available_factors,
+            if response_enrolled.status_code >= 400:
+                return {"error": response_enrolled.json()}, response_enrolled.status_code
+            
+            enrolled_factors = response_enrolled.json()
+
+            for factor in enrolled_factors:
+                factor_id = factor.get("factorType")
+                factore_name = factor.get("provider") if factor_id == "token:software:totp" else factor_id
+                factor["name"] = factore_name
+            
+            # Prepare response
+            response_data = {
+                "supported_factors": supported_factors,
                 "enrolled_factors": enrolled_factors
             }
+            
+            # Add enrollment status for each supported factor
+            for factor in supported_factors:
+                factor_id = factor.get("factorType")
+                factore_name = factor.get("provider") if factor_id == "token:software:totp" else factor_id
+                factor["name"] = factore_name
+                is_enrolled = any([f for f in enrolled_factors if f.get("name") == factore_name])
+                factor["enrolled"] = is_enrolled
+            
+            return response_data
+        
         except Exception as e:
-            app.logger.error(f"MFA get exception: {str(e)}")
             return {"error": str(e)}, 400
 
-    
     @oidc.require_login
     def post(self):
-        data = request.get_json()
-        user_info = oidc.user_getinfo(["sub"])
-        okta_id = user_info.get("sub")
-        
-        factor_type = data.get("factor_type")
-        
         try:
-            # Get user from Okta
-            user, resp, err = okta_client.get_user(okta_id)
-            if err:
-                return {"error": str(err)}, 400
-                
-            # Get subscription
-            subscription = user.profile.subscription if hasattr(user.profile, 'subscription') else "basic"
+            data = request.get_json()
+            user_info = oidc.user_getinfo(["sub"])
+            okta_id = user_info.get("sub")
             
-            # Verify if the factor is allowed for this subscription
-            available_factors = get_mfa_factors_by_subscription(subscription)
-            if factor_type not in available_factors:
-                return {"error": "Factor not available for your subscription"}, 403
+            # Enroll a new factor
+            okta_url_enroll = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}/factors"
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+            }
             
-            # In a real implementation, you would enroll the factor using Okta API
-            # This is a simplified example
+            # Prepare factor data based on type
+            factor_type = data.get("factor_type")
+            if factor_type == "question":
+                factor_data = {
+                    "factorType": "question",
+                    "provider": "OKTA",
+                    "profile": {
+                        "question": data.get("question"),
+                        "answer": data.get("answer")
+
+                    }
+                }
+            elif factor_type == "OKTA":
+                factor_data = {
+                    "factorType": "token:software:totp",
+                    "provider": "OKTA"
+                }
+            elif factor_type == "GOOGLE":
+                factor_data = {
+                    "factorType": "token:software:totp",
+                    "provider": "GOOGLE"
+                }
+            else:
+                return {"error": "Unsupported factor type"}, 400
             
-            return {"message": f"{factor_type} factor enrolled successfully"}
+            response = requests.post(okta_url_enroll, headers=headers, json=factor_data, verify=False)
+            
+            if response.status_code >= 400:
+                return {"error": response.json()}, response.status_code
+            
+            return {"message": f"{factor_type} factor enrolled successfully"}, 201
+        
         except Exception as e:
             return {"error": str(e)}, 400
 
@@ -296,7 +585,6 @@ class LoginStatusResource(Resource):
             user_info = None
             if is_logged_in:
                 user_info = oidc.user_getinfo(['sub', 'name', 'email'])
-            
             return {
                 "loggedIn": is_logged_in,
                 "userInfo": user_info
@@ -318,62 +606,96 @@ def login():
     # Generate a secure state parameter
     state = os.urandom(16).hex()
     session['oauth_state'] = state
-    
     # Include state in the authorization request
+
     return oidc.redirect_to_auth_server(
+
         redirect_uri=url_for('oidc_callback', _external=True),
-        state=state
+
+        state=state,
+
     )
 
 
 
+
 import logging
+
 logging.basicConfig(level=logging.DEBUG)
 
+ 
+
 @app.route('/oidc/callback')
+
 def oidc_callback():
+
     try:
+
         app.logger.debug("Callback received")
+
         app.logger.debug(f"Request args: {request.args}")
-        
+
+       
+
         # Process the callback
+
         info = oidc.callback()
+
         app.logger.debug(f"Callback info: {info}")
-        
+
+       
+
         # Set a session variable to indicate successful login
+
         user_info = oidc.user_getinfo(['sub', 'name', 'email'])
+
         session['user_info'] = user_info
+
         app.logger.debug(f"User info: {user_info}")
-        
+
+       
+
         # Redirect to frontend profile page
+
         return redirect('http://localhost:8080/profile')
+
     except Exception as e:
+
         app.logger.error(f"Callback error: {str(e)}")
+
         app.logger.error(f"Callback error details: {repr(e)}")
+
         return jsonify({"error": str(e)}), 500
 
 
 
 
 
+
 @app.route('/')
+
 def index():
+
     # Redirect to the frontend
+
     return redirect('http://localhost:8080')
 
 
 
-@app.route('/logout')
-def logout():
-    # Clear the Flask session
-    session.clear()
-    # Redirect to Okta's logout endpoint with a post_logout_redirect_uri
-    return oidc.logout(return_to=url_for('index', _external=True))
 
+@app.route('/logout')
+
+def logout():
+
+    # Clear the Flask session
+
+    session.clear()
+
+
+    return oidc.logout(return_to=url_for('index', _external=True))
 
 if __name__ == '__main__':
     app.run(debug=True)
-
 // File: frontend/README.md
 # frontend
 
@@ -869,9 +1191,18 @@ export default {
     return apiClient.get('/mfa');
   },
   
-  enrollFactor(factorType) {
-    return apiClient.post('/mfa', { factor_type: factorType });
+getSecurityQuestions() {
+  return apiClient.get('/mfa/questions');
+},
+
+enrollFactor(name, data = null) {
+  if (data) {
+    return apiClient.post('/mfa', data);
+  } else {
+    return apiClient.post('/mfa', { factor_type: name });
   }
+}
+
 };
 
 // File: frontend/src/services/toast.js
@@ -1460,7 +1791,7 @@ export default {
 
 // File: frontend/src/views/Profile.vue
 <template>
-    <div class="profile" v-if="profile">
+  <div class="profile" v-if="profile">
     <h1>Your Profile</h1>
     
     <div v-if="!editing">
@@ -1631,7 +1962,7 @@ export default {
           <ul class="benefits">
             <li>Okta Verify authentication</li>
             <li>Google Authenticator support</li>
-            <li>Phone Authentication</li>
+            <li>Security Question Authentication</li>
           </ul>
           <button v-if="profile.subscription !== 'premium+'" 
                   @click="updateSubscription('premium+')"
@@ -1650,39 +1981,97 @@ export default {
         <p>Refreshing available MFA options...</p>
         <div class="spinner"></div>
       </div>
-      
-      <div v-else-if="mfa.available.length > 0">
-        <p>Available factors for your subscription:</p>
-        <ul>
-          <li v-for="factor in mfa.available" :key="factor">
-            {{ getFriendlyFactorName(factor) }}
-            <button 
-              v-if="!isFactorEnrolled(factor)" 
-              @click="enrollFactor(factor)"
-              :disabled="enrolling === factor"
-            >
-              {{ enrolling === factor ? 'Enrolling...' : 'Enroll' }}
-            </button>
-            <span v-else class="enrolled">Enrolled</span>
-          </li>
-        </ul>
-      </div>
-      
       <div v-else>
-        <p>No MFA factors available for your subscription level.</p>
+        <div v-if="mfa.supported_factors && mfa.supported_factors.length > 0">
+          <p>Available factors:</p>
+          <ul>
+            <li v-for="factor in mfa.supported_factors" :key="factor.name">
+              {{ getFriendlyFactorName(factor.name) }}
+              <button 
+                v-if="!factor.enrolled" 
+                @click="enrollFactor(factor.name)"
+                :disabled="enrolling === factor.name"
+              >
+                {{ enrolling === factor.name ? 'Enrolling...' : 'Enroll' }}
+              </button>
+              <span v-else class="enrolled">Enrolled</span>
+            </li>
+          </ul>
+        </div>
+        <div v-else-if="mfa.supported_factors === undefined || mfa.supported_factors.length === 0">
+          <p>No MFA factors available.</p>
+        </div>
       </div>
     </div>
-
+    
     <div v-if="error" class="error">{{ error }}</div>
   </div>
   <LoadingSpinner v-else message="Loading profile..." />
 
+  <!-- Security Question Modal -->
+  <div v-if="showSecurityQuestionModal" class="modal-overlay">
+    <div class="security-question-modal">
+      <h3>Set Up Security Question</h3>
+      
+      <div v-if="securityQuestions && securityQuestions.length > 0">
+        <div class="form-group">
+          <label for="securityQuestion">Select a security question:</label>
+          <select id="securityQuestion" v-model="selectedQuestion">
+            <option value="">Choose a question</option>
+            <option v-for="q in securityQuestions" :key="q.question" :value="q.question">
+              {{ q.questionText }}
+            </option>
+          </select>
+        </div>
+        
+        <div class="form-group">
+          <label for="securityAnswer">Your answer:</label>
+          <input 
+            type="text" 
+            id="securityAnswer" 
+            v-model="securityAnswer" 
+            placeholder="Enter your answer"
+          >
+        </div>
+        
+        <div v-if="questionError" class="error-message">
+          {{ questionError }}
+        </div>
+        
+        <div class="modal-actions">
+          <button 
+            @click="submitSecurityQuestion" 
+            :disabled="!selectedQuestion || !securityAnswer"
+          >
+            Submit
+          </button>
+          <button 
+            @click="cancelSecurityQuestion" 
+            type="button"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+      
+      <div v-else-if="securityQuestions && securityQuestions.length === 0">
+        <p>No security questions are available.</p>
+        <button @click="cancelSecurityQuestion">Close</button>
+      </div>
+      
+      <div v-else class="loading">
+        <p>Loading security questions...</p>
+        <div class="spinner"></div>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script>
 import api from '../services/api';
 import toast from '../services/toast';
 import LoadingSpinner from '../views/LoadingSpinner.vue';
+
 export default {
   name: 'ProfileView',
   components: {
@@ -1692,8 +2081,8 @@ export default {
     return {
       profile: null,
       mfa: {
-        available: [],
-        enrolled: []
+        supported_factors: [],
+        enrolled_factors: []
       },
       editing: false,
       editForm: {
@@ -1719,8 +2108,14 @@ export default {
       enrolling: null,
       error: null,
       refreshingMfa: false,
-    }},
-    computed: {
+      showSecurityQuestionModal: false,
+      securityQuestions: null,
+      selectedQuestion: '',
+      securityAnswer: '',
+      questionError: ''
+    }
+  },
+  computed: {
     hasAdditionalDetails() {
       return this.profile && (
         this.profile.mobilePhone || 
@@ -1734,8 +2129,10 @@ export default {
   async created() {
     try {
       const response = await api.getProfile();
+      const mfaresponse = await api.getMfaFactors();
       this.profile = response.data.profile;
-      this.mfa = response.data.mfa;
+      this.mfa.supported_factors = mfaresponse.data.supported_factors;
+      this.mfa.enrolled_factors = mfaresponse.data.enrolled_factors || [];
       
       // Initialize edit form with all fields
       this.initializeEditForm();
@@ -1838,20 +2235,73 @@ export default {
       }
     },
     
-    async enrollFactor(factorType) {
-      this.enrolling = factorType;
+    async enrollFactor(name) {
+      this.enrolling = name;
       this.error = null;
       
+      if (name === 'question') {
+        // Show security question modal
+        this.showSecurityQuestionModal = true;
+        // Fetch available security questions
+        await this.fetchSecurityQuestions();
+      } else {
+        try {
+          await api.enrollFactor(name);
+          toast.success(`Enrolled in ${this.getFriendlyFactorName(name)} successfully`);
+          // Refresh MFA options after enrolling
+          await this.refreshMfaOptions();
+        } catch (error) {
+          this.error = error.response?.data?.error || `Failed to enroll in ${this.getFriendlyFactorName(name)}`;
+        } finally {
+          this.enrolling = null;
+        }
+      }
+    },
+    
+    async fetchSecurityQuestions() {
       try {
-        await api.enrollFactor(factorType);
-        
-        // Add to enrolled factors
-        this.mfa.enrolled.push(factorType);
+        const response = await api.getSecurityQuestions();
+        this.securityQuestions = response.data;
       } catch (error) {
-        this.error = error.response?.data?.error || `Failed to enroll in ${this.getFriendlyFactorName(factorType)}`;
+        this.error = error.response?.data?.error || 'Failed to load security questions';
+        this.showSecurityQuestionModal = false;
+      }
+    },
+    
+    async submitSecurityQuestion() {
+      try {
+        if (!this.selectedQuestion || !this.securityAnswer) {
+          this.questionError = 'Please select a question and provide an answer';
+          return;
+        }
+        
+        await api.enrollFactor('question', {
+          factor_type: 'question',
+          question: this.selectedQuestion,
+          answer: this.securityAnswer
+        });
+        
+        toast.success('Security question enrolled successfully');
+        this.showSecurityQuestionModal = false;
+        this.selectedQuestion = '';
+        this.securityAnswer = '';
+        this.questionError = '';
+        
+        // Refresh MFA options after enrolling
+        await this.refreshMfaOptions();
+      } catch (error) {
+        this.questionError = error.response?.data?.error || 'Failed to enroll security question';
       } finally {
         this.enrolling = null;
       }
+    },
+    
+    cancelSecurityQuestion() {
+      this.showSecurityQuestionModal = false;
+      this.selectedQuestion = '';
+      this.securityAnswer = '';
+      this.questionError = '';
+      this.enrolling = null;
     },
     
     async refreshMfaOptions() {
@@ -1861,13 +2311,14 @@ export default {
         const authStatus = await api.checkLoginStatus();
         if (!authStatus.data.loggedIn) {
           // Redirect to login if not authenticated
+
           window.location.href = 'http://localhost:5000/login';
           return;
         }
         
         const response = await api.getMfaFactors();
-        this.mfa.available = response.data.available_factors;
-        this.mfa.enrolled = response.data.enrolled_factors || [];
+        this.mfa.supported_factors = response.data.supported_factors;
+        this.mfa.enrolled_factors = response.data.enrolled_factors || [];
       } catch (error) {
         console.error('Failed to refresh MFA options:', error);
         if (error.response && error.response.status === 400) {
@@ -1881,20 +2332,20 @@ export default {
       }
     },
     
-    isFactorEnrolled(factor) {
-      return this.mfa.enrolled.includes(factor);
-    },
+    // isFactorEnrolled(factorType) {
+    //   return this.mfa.enrolled_factors.includes(factorType);
+    // },
     
-    getFriendlyFactorName(factor) {
+    getFriendlyFactorName(factorType) {
       const names = {
-        'oktaverify': 'Okta Verify',
-        'google': 'Google Authenticator',
-        'phone': 'Phone Authentication'
+        'question': 'Security Question',
+        'OKTA': 'Okta Verify',
+        'GOOGLE': 'Google Authenticator'
       };
       
-      return names[factor] || factor;
+      return names[factorType] || factorType;
     },
-
+    
     initializeEditForm() {
       this.editForm = {
         firstName: this.profile.firstName || '',
@@ -2001,7 +2452,7 @@ h2 {
 .form-group select:focus {
   outline: none;
   border-color: var(--primary-color);
-  box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.2);
+  box-shadow: 0 0 0 2px rgba(66,133, 244, 0.2);
 }
 
 .form-actions {
@@ -2321,6 +2772,46 @@ button:disabled {
 @keyframes slideUp {
   from { opacity: 0; transform: translateY(20px); }
   to { opacity: 1; transform: translateY(0); }
+}
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.security-question-modal {
+  background-color: var(--card-background);
+  border-radius: 8px;
+  padding: 2rem;
+  width: 90%;
+  max-width: 500px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.security-question-modal h3 {
+  margin-top: 0;
+  color: var(--primary-color);
+  margin-bottom: 1.5rem;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+.error-message {
+  color: var(--accent-color);
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
 }
 </style>
 

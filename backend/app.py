@@ -12,9 +12,9 @@ from flask_session import Session
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, 
-     supports_credentials=True, 
-     origins=["http://localhost:8080", "http://localhost:5000"], 
+CORS(app,
+     supports_credentials=True,
+     origins=["http://localhost:8080", "http://localhost:5000"],
      allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
      expose_headers=["Content-Type", "Authorization"],
      allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
@@ -47,177 +47,427 @@ Session(app)
 
 
 
-
+import ssl
+from okta.request_executor import RequestExecutor
 
 # Initialize OpenIDConnect
 oidc = OpenIDConnect(app)
 
-# Initialize Okta Client
+ 
+
+import requests
+
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+
+# Disable SSL warnings
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+
+# Patch the requests session
+
+old_init = requests.Session.__init__
+
+ 
+
+def new_init(self, *args, **kwargs):
+
+    old_init(self, *args, **kwargs)
+
+    self.verify = False
+
+ 
+
+requests.Session.__init__ = new_init
+
+ 
+
+# Initialize Okta Client normally
+
 okta_client = OktaClient({
+
     'orgUrl': os.getenv("OKTA_ORG_URL"),
+
     'token': os.getenv("OKTA_API_TOKEN")
+
 })
 
-# Helper functions
-def get_mfa_factors_by_subscription(subscription):
-    factors = {
-        "basic": ["oktaverify"],
-        "premium": ["oktaverify", "google"],
-        "premium+": ["oktaverify", "phone", "google"]
-    }
-    return factors.get(subscription, ["oktaverify"])
 
+
+
+# Helper functions
+
+# def get_mfa_factors_by_subscription(subscription):
+
+#     factors = {
+
+#         "basic": ["oktaverify"],
+
+#         "premium": ["oktaverify", "google"],
+
+#         "premium+": ["oktaverify", "securityquestion", "google"]
+
+#     }
+
+#     return factors.get(subscription, ["oktaverify"])
+
+ 
 
 class SignupResource(Resource):
+
     def post(self):
+
         data = request.get_json()
-        
+
+       
+
         try:
-            # Create user in Okta
+
+            # Create user in Okta using direct requests
+
             user_profile = {
+
                 "firstName": data["firstName"],
+
                 "lastName": data["lastName"],
+
                 "email": data["email"],
+
                 "login": data["email"],
+
                 "subscription": data.get("subscription", "basic"),
-                "source": request.headers.get("Origin", "direct"),
+
+                # "source": request.headers.get("Origin", "direct"),
+
                 "appAccess": True
+
             }
-            
+
+           
+
             user_credentials = {
+
                 "password": {"value": data["password"]}
+
             }
-            
+
+           
+
             user = {
+
                 "profile": user_profile,
+
                 "credentials": user_credentials
+
             }
-            
-            # Pass activate as a query parameter
-            query_params = {"activate": "true"}
-            
-            # Use asyncio to run the coroutine
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            created_user, resp, err = loop.run_until_complete(
-                okta_client.create_user(user, query_params)
+
+           
+
+            # Prepare the request
+
+            okta_url = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users"
+
+            headers = {
+
+                "Accept": "application/json",
+
+                "Content-Type": "application/json",
+
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+
+            }
+
+            params = {"activate": "true"}
+
+           
+
+            # Make the request with SSL verification disabled
+
+            response = requests.post(
+
+                okta_url,
+
+                headers=headers,
+
+                params=params,
+
+                json=user,
+
+                verify=False
+
             )
-            
-            if err:
-                return {"error": str(err)}, 400
-            
-            
-                
-            return {"message": "User created successfully", "id": created_user.id}, 201
-            
+
+           
+
+            if response.status_code >= 400:
+
+                return {"error": response.json()}, response.status_code
+
+           
+
+            created_user = response.json()
+
+            return {"message": "User created successfully", "id": created_user["id"]}, 201
+
+           
+
         except Exception as e:
+
             return {"error": str(e)}, 400
+
+
 
 
 
 class UserProfileResource(Resource):
-    @oidc.require_login
-    def get(self):
-        try:
-            user_info = oidc.user_getinfo(["sub", "name", "email"])
-            okta_id = user_info.get("sub")
-            
-            # Get full user profile from Okta
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            user, resp, err = loop.run_until_complete(
-                okta_client.get_user(okta_id)
-            )
-            
-            if err:
-                return {"error": str(err)}, 400
-            
-            # Get user's subscription and other profile attributes
-            subscription = user.profile.subscription if hasattr(user.profile, 'subscription') else "basic"
-            source = user.profile.source if hasattr(user.profile, 'source') else "direct"
-            
-            # Get additional profile attributes if they exist
-            mobilePhone = user.profile.mobilePhone if hasattr(user.profile, 'mobilePhone') else ""
-            secondEmail = user.profile.secondEmail if hasattr(user.profile, 'secondEmail') else ""
-            city = user.profile.city if hasattr(user.profile, 'city') else ""
-            state = user.profile.state if hasattr(user.profile, 'state') else ""
-            countryCode = user.profile.countryCode if hasattr(user.profile, 'countryCode') else ""
-            
-            # Get available factors based on subscription
-            available_factors = get_mfa_factors_by_subscription(subscription)
-            
-            # Get enrolled factors
-            enrolled_factors = []
-            # In a real implementation, you would get enrolled factors from Okta API
-            
-            return {
-                "profile": {
-                    "id": okta_id,
-                    "firstName": user.profile.firstName,
-                    "lastName": user.profile.lastName,
-                    "email": user.profile.email,
-                    "subscription": subscription,
-                    "source": source,
-                    "mobilePhone": mobilePhone,
-                    "secondEmail": secondEmail,
-                    "city": city,
-                    "state": state,
-                    "countryCode": countryCode
-                },
-                "mfa": {
-                    "available": available_factors,
-                    "enrolled": enrolled_factors
-                }
-            }
-        except Exception as e:
-            app.logger.error(f"Profile error: {str(e)}")
-            return {"error": str(e)}, 400
 
     @oidc.require_login
-    def put(self):
+
+    def get(self):
+
         try:
-            data = request.get_json()
-            user_info = oidc.user_getinfo(["sub"])
+
+            user_info = oidc.user_getinfo(["sub", "name", "email"])
+
             okta_id = user_info.get("sub")
-            
-            # Update user in Okta
-            user_data = {
-                "profile": {
-                    "email": user_info.get("email"),
-                    "login": user_info.get("email"),
-                    "firstName": data.get("firstName"),
-                    "lastName": data.get("lastName"),
-                    "subscription": data.get("subscription"),
-                    "appAccess": True
-                }
+
+           
+
+            # Get full user profile from Okta using direct requests
+
+            okta_url = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}"
+
+            headers = {
+
+                "Accept": "application/json",
+
+                "Content-Type": "application/json",
+
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+
             }
-            
-            # Add additional fields if they are provided
-            if "mobilePhone" in data:
-                user_data["profile"]["mobilePhone"] = data.get("mobilePhone")
-            if "secondEmail" in data:
-                user_data["profile"]["secondEmail"] = data.get("secondEmail")
-            if "city" in data:
-                user_data["profile"]["city"] = data.get("city")
-            if "state" in data:
-                user_data["profile"]["state"] = data.get("state")
-            if "countryCode" in data:
-                user_data["profile"]["countryCode"] = data.get("countryCode")
-            
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            _, resp, err = loop.run_until_complete(
-                okta_client.update_user(okta_id, user_data)
+
+           
+
+            # Make the request with SSL verification disabled
+
+            response = requests.get(
+
+                okta_url,
+
+                headers=headers,
+
+                verify=False
+
             )
-            
-            if err:
-                app.logger.error(f"Update error: {str(err)}")
-                return {"error": str(err)}, 400
-                
-            return {"message": "Profile updated successfully"}
+
+           
+
+            if response.status_code >= 400:
+
+                return {"error": response.json()}, response.status_code
+
+           
+
+            user_data = response.json()
+
+           
+
+            # Get user's subscription and other profile attributes
+
+            profile = user_data.get("profile", {})
+
+            subscription = profile.get("subscription", "basic")
+
+            source = profile.get("source", "direct")
+
+           
+
+            # Get additional profile attributes if they exist
+
+            mobilePhone = profile.get("mobilePhone", "")
+
+            secondEmail = profile.get("secondEmail", "")
+
+            city = profile.get("city", "")
+
+            state = profile.get("state", "")
+
+            countryCode = profile.get("countryCode", "")
+
+           
+
+            # Get available factors based on subscription
+
+            # available_factors = get_mfa_factors_by_subscription(subscription)
+
+           
+
+            # Get enrolled factors
+
+            # enrolled_factors = []
+
+            # In a real implementation, you would get enrolled factors from Okta API
+
+           
+
+            return {
+
+                "profile": {
+
+                    "id": okta_id,
+
+                    "firstName": profile.get("firstName", ""),
+
+                    "lastName": profile.get("lastName", ""),
+
+                    "email": profile.get("email", ""),
+
+                    "subscription": subscription,
+
+                    "source": source,
+
+                    "mobilePhone": mobilePhone,
+
+                    "secondEmail": secondEmail,
+
+                    "city": city,
+
+                    "state": state,
+
+                    "countryCode": countryCode
+
+                },
+
+                # "mfa": {
+
+                #     "available": available_factors,
+
+                #     "enrolled": enrolled_factors
+
+                # }
+
+            }
+
         except Exception as e:
-            app.logger.error(f"Update exception: {str(e)}")
+
+            app.logger.error(f"Profile error: {str(e)}")
+
             return {"error": str(e)}, 400
+
+ 
+
+    @oidc.require_login
+
+    def put(self):
+
+        try:
+
+            data = request.get_json()
+
+            user_info = oidc.user_getinfo(["sub", "email"])
+
+            okta_id = user_info.get("sub")
+
+           
+
+            # Update user in Okta using direct requests
+
+            user_data = {
+
+                "profile": {
+
+                    "email": user_info.get("email"),
+
+                    "login": user_info.get("email"),
+
+                    "firstName": data.get("firstName"),
+
+                    "lastName": data.get("lastName"),
+
+                    "subscription": data.get("subscription"),
+
+                    "appAccess": True
+
+                }
+
+            }
+
+           
+
+            # Add additional fields if they are provided
+
+            if "mobilePhone" in data:
+
+                user_data["profile"]["mobilePhone"] = data.get("mobilePhone")
+
+            if "secondEmail" in data:
+
+                user_data["profile"]["secondEmail"] = data.get("secondEmail")
+
+            if "city" in data:
+
+                user_data["profile"]["city"] = data.get("city")
+
+            if "state" in data:
+
+                user_data["profile"]["state"] = data.get("state")
+
+            if "countryCode" in data:
+
+                user_data["profile"]["countryCode"] = data.get("countryCode")
+
+           
+
+            # Prepare the request
+
+            okta_url = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}"
+
+            headers = {
+
+                "Accept": "application/json",
+
+                "Content-Type": "application/json",
+
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+
+            }
+
+           
+
+            # Make the request with SSL verification disabled
+
+            response = requests.post(
+
+                okta_url,
+
+                headers=headers,
+
+                json=user_data,
+
+                verify=False
+
+            )
+
+           
+
+            if response.status_code >= 400:
+
+                app.logger.error(f"Update error: {response.json()}")
+
+                return {"error": response.json()}, response.status_code
+
+               
+
+            return {"message": "Profile updated successfully"}
+
+        except Exception as e:
+
+            app.logger.error(f"Update exception: {str(e)}")
+
+            return {"error": str(e)}, 400
+
+
 
 
 
@@ -228,66 +478,100 @@ class MFAResource(Resource):
             user_info = oidc.user_getinfo(["sub"])
             okta_id = user_info.get("sub")
             
-            # Get user from Okta
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            user, resp, err = loop.run_until_complete(
-                okta_client.get_user(okta_id)
-            )
+            # List all supported factors
+            okta_url_supported = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}/factors/catalog"
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+            }
+            response_supported = requests.get(okta_url_supported, headers=headers, verify=False)
             
-            if err:
-                app.logger.error(f"MFA get error: {str(err)}")
-                return {"error": str(err)}, 400
-                
-            # Get subscription
-            subscription = user.profile.subscription if hasattr(user.profile, 'subscription') else "basic"
+            if response_supported.status_code >= 400:
+                return {"error": response_supported.json()}, response_supported.status_code
             
-            # Get available factors based on subscription
-            available_factors = get_mfa_factors_by_subscription(subscription)
+            supported_factors = response_supported.json()
             
-            # Get enrolled factors (simplified)
-            enrolled_factors = []
+            # List all enrolled factors
+            okta_url_enrolled = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}/factors"
+            response_enrolled = requests.get(okta_url_enrolled, headers=headers, verify=False)
             
-            return {
-                "available_factors": available_factors,
+            if response_enrolled.status_code >= 400:
+                return {"error": response_enrolled.json()}, response_enrolled.status_code
+            
+            enrolled_factors = response_enrolled.json()
+
+            for factor in enrolled_factors:
+                factor_id = factor.get("factorType")
+                factore_name = factor.get("provider") if factor_id == "token:software:totp" else factor_id
+                factor["name"] = factore_name
+            
+            # Prepare response
+            response_data = {
+                "supported_factors": supported_factors,
                 "enrolled_factors": enrolled_factors
             }
+            
+            # Add enrollment status for each supported factor
+            for factor in supported_factors:
+                factor_id = factor.get("factorType")
+                factore_name = factor.get("provider") if factor_id == "token:software:totp" else factor_id
+                factor["name"] = factore_name
+                is_enrolled = any([f for f in enrolled_factors if f.get("name") == factore_name])
+                factor["enrolled"] = is_enrolled
+            
+            return response_data
+        
         except Exception as e:
-            app.logger.error(f"MFA get exception: {str(e)}")
             return {"error": str(e)}, 400
 
-    
     @oidc.require_login
     def post(self):
-        data = request.get_json()
-        user_info = oidc.user_getinfo(["sub"])
-        okta_id = user_info.get("sub")
-        
-        factor_type = data.get("factor_type")
-        
         try:
-            # Get user from Okta using asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            user, resp, err = loop.run_until_complete(
-                okta_client.get_user(okta_id)
-            )
+            data = request.get_json()
+            user_info = oidc.user_getinfo(["sub"])
+            okta_id = user_info.get("sub")
             
-            if err:
-                return {"error": str(err)}, 400
-                
-            # Get subscription
-            subscription = user.profile.subscription if hasattr(user.profile, 'subscription') else "basic"
+            # Enroll a new factor
+            okta_url_enroll = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}/factors"
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+            }
             
-            # Verify if the factor is allowed for this subscription
-            available_factors = get_mfa_factors_by_subscription(subscription)
-            if factor_type not in available_factors:
-                return {"error": "Factor not available for your subscription"}, 403
+            # Prepare factor data based on type
+            factor_type = data.get("factor_type")
+            if factor_type == "question":
+                factor_data = {
+                    "factorType": "question",
+                    "provider": "OKTA",
+                    "profile": {
+                        "question": data.get("question"),
+                        "answer": data.get("answer")
+
+                    }
+                }
+            elif factor_type == "OKTA":
+                factor_data = {
+                    "factorType": "token:software:totp",
+                    "provider": "OKTA"
+                }
+            elif factor_type == "GOOGLE":
+                factor_data = {
+                    "factorType": "token:software:totp",
+                    "provider": "GOOGLE"
+                }
+            else:
+                return {"error": "Unsupported factor type"}, 400
             
-            # In a real implementation, you would enroll the factor using Okta API
-            # This is a simplified example
+            response = requests.post(okta_url_enroll, headers=headers, json=factor_data, verify=False)
             
-            return {"message": f"{factor_type} factor enrolled successfully"}
+            if response.status_code >= 400:
+                return {"error": response.json()}, response.status_code
+            
+            return {"message": f"{factor_type} factor enrolled successfully"}, 201
+        
         except Exception as e:
             return {"error": str(e)}, 400
 
@@ -300,7 +584,6 @@ class LoginStatusResource(Resource):
             user_info = None
             if is_logged_in:
                 user_info = oidc.user_getinfo(['sub', 'name', 'email'])
-            
             return {
                 "loggedIn": is_logged_in,
                 "userInfo": user_info
@@ -322,58 +605,93 @@ def login():
     # Generate a secure state parameter
     state = os.urandom(16).hex()
     session['oauth_state'] = state
-    
     # Include state in the authorization request
+
     return oidc.redirect_to_auth_server(
+
         redirect_uri=url_for('oidc_callback', _external=True),
-        state=state
+
+        state=state,
+
     )
 
 
 
+
 import logging
+
 logging.basicConfig(level=logging.DEBUG)
 
+ 
+
 @app.route('/oidc/callback')
+
 def oidc_callback():
+
     try:
+
         app.logger.debug("Callback received")
+
         app.logger.debug(f"Request args: {request.args}")
-        
+
+       
+
         # Process the callback
+
         info = oidc.callback()
+
         app.logger.debug(f"Callback info: {info}")
-        
+
+       
+
         # Set a session variable to indicate successful login
+
         user_info = oidc.user_getinfo(['sub', 'name', 'email'])
+
         session['user_info'] = user_info
+
         app.logger.debug(f"User info: {user_info}")
-        
+
+       
+
         # Redirect to frontend profile page
+
         return redirect('http://localhost:8080/profile')
+
     except Exception as e:
+
         app.logger.error(f"Callback error: {str(e)}")
+
         app.logger.error(f"Callback error details: {repr(e)}")
+
         return jsonify({"error": str(e)}), 500
 
 
 
 
 
+
 @app.route('/')
+
 def index():
+
     # Redirect to the frontend
+
     return redirect('http://localhost:8080')
 
 
 
-@app.route('/logout')
-def logout():
-    # Clear the Flask session
-    session.clear()
-    # Redirect to Okta's logout endpoint with a post_logout_redirect_uri
-    return oidc.logout(return_to=url_for('index', _external=True))
 
+@app.route('/logout')
+
+def logout():
+
+    # Clear the Flask session
+
+    session.clear()
+
+
+    return oidc.logout(return_to=url_for('index', _external=True))
 
 if __name__ == '__main__':
     app.run(debug=True)

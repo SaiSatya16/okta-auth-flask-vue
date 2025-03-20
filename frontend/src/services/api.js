@@ -32,7 +32,16 @@ export default {
     return apiClient.get('/mfa');
   },
   
-  enrollFactor(factorType) {
-    return apiClient.post('/mfa', { factor_type: factorType });
+getSecurityQuestions() {
+  return apiClient.get('/mfa/questions');
+},
+
+enrollFactor(name, data = null) {
+  if (data) {
+    return apiClient.post('/mfa', data);
+  } else {
+    return apiClient.post('/mfa', { factor_type: name });
   }
+}
+
 };
