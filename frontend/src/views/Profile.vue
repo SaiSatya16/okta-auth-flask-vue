@@ -273,6 +273,65 @@
       </div>
     </div>
   </div>
+
+  <!-- Add this to the Profile.vue template, after the security question modal -->
+<!-- QR Code Modal for TOTP factors -->
+<div v-if="showQRCodeModal" class="modal-overlay">
+  <div class="qr-code-modal">
+    <h3>Set Up {{ enrollmentData?.provider }} Authenticator</h3>
+    
+    <div class="qr-code-container">
+      <p>Scan this QR code with your authenticator app:</p>
+      <img 
+        v-if="enrollmentData?._embedded?.activation?._links?.qrcode?.href" 
+        :src="enrollmentData._embedded.activation._links.qrcode.href" 
+        alt="QR Code"
+        class="qr-code"
+      />
+      
+      <div class="manual-setup">
+        <p>Or enter this code manually:</p>
+        <div class="secret-key">{{ enrollmentData?._embedded?.activation?.sharedSecret }}</div>
+      </div>
+    </div>
+    
+    <div class="activation-form">
+      <p>Enter the verification code from your authenticator app:</p>
+      <div class="form-group">
+        <input 
+          type="text" 
+          v-model="activationCode" 
+          placeholder="Enter 6-digit code"
+          maxlength="6"
+          pattern="[0-9]*"
+          inputmode="numeric"
+        />
+      </div>
+      
+      <div v-if="activationError" class="error-message">
+        {{ activationError }}
+      </div>
+      
+      <div class="modal-actions">
+        <button 
+          @click="activateFactor" 
+          :disabled="!activationCode || activating"
+        >
+          {{ activating ? 'Verifying...' : 'Verify' }}
+        </button>
+        <button 
+          @click="cancelActivation" 
+          type="button"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+
 </template>
 
 <script>
@@ -320,7 +379,12 @@ export default {
       securityQuestions: null,
       selectedQuestion: '',
       securityAnswer: '',
-      questionError: ''
+      questionError: '',
+      enrollmentData: null,
+      showQRCodeModal: false,
+      activationCode: '',
+      activating: false,
+      activationError: ''
     }
   },
   computed: {
@@ -454,17 +518,60 @@ export default {
         await this.fetchSecurityQuestions();
       } else {
         try {
-          await api.enrollFactor(name);
-          toast.success(`Enrolled in ${this.getFriendlyFactorName(name)} successfully`);
-          // Refresh MFA options after enrolling
-          await this.refreshMfaOptions();
-        } catch (error) {
-          this.error = error.response?.data?.error || `Failed to enroll in ${this.getFriendlyFactorName(name)}`;
-        } finally {
-          this.enrolling = null;
-        }
+      const response = await api.enrollFactor(name);
+      this.enrollmentData = response.data;
+      
+      // Show QR code modal for TOTP factors
+      if (response.data._embedded && response.data._embedded.activation) {
+        this.showQRCodeModal = true;
+      } else {
+        toast.success(`Enrolled in ${this.getFriendlyFactorName(name)} successfully`);
+        // Refresh MFA options after enrolling
+        this.refreshingMfa = true;
+        await this.refreshMfaOptions();
+        this.refreshingMfa = false;
       }
-    },
+    } catch (error) {
+      this.error = error.response?.data?.error || `Failed to enroll in ${this.getFriendlyFactorName(name)}`;
+      toast.error(this.error);
+    } finally {
+      this.enrolling = null;
+    }
+  }
+},
+
+async activateFactor() {
+  if (!this.activationCode || !this.enrollmentData) {
+    this.activationError = 'Please enter the verification code';
+    return;
+  }
+  
+  this.activating = true;
+  this.activationError = '';
+  
+  try {
+    const activationLink = this.enrollmentData._links.activate.href;
+    await api.activateFactor(activationLink, this.activationCode);
+    
+    toast.success('Factor activated successfully');
+    this.showQRCodeModal = false;
+    this.enrollmentData = null;
+    this.activationCode = '';
+    
+    // Refresh MFA options after activation
+    await this.refreshMfaOptions();
+  } catch (error) {
+    this.activationError = error.response?.data?.error || 'Failed to activate factor. Please check your code and try again.';
+  } finally {
+    this.activating = false;
+  }
+},
+cancelActivation() {
+  this.showQRCodeModal = false;
+  this.enrollmentData = null;
+  this.activationCode = '';
+  this.activationError = '';
+},
     
     async fetchSecurityQuestions() {
       try {
@@ -1021,5 +1128,68 @@ button:disabled {
   margin-top: 0.5rem;
   font-size: 0.9rem;
 }
+
+/* Add to the <style> section in Profile.vue */
+.qr-code-modal {
+  background-color: var(--card-background);
+  border-radius: 8px;
+  padding: 2rem;
+  width: 90%;
+  max-width: 500px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.qr-code-modal h3 {
+  margin-top: 0;
+  color: var(--primary-color);
+  margin-bottom: 1.5rem;
+  text-align: center;
+}
+
+.qr-code-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.qr-code {
+  width: 200px;
+  height: 200px;
+  margin: 1rem 0;
+  border: 1px solid var(--border-color);
+  padding: 0.5rem;
+  background-color: white;
+}
+
+.manual-setup {
+  margin-top: 1rem;
+  text-align: center;
+  width: 100%;
+}
+
+.secret-key {
+  font-family: monospace;
+  font-size: 1.2rem;
+  background-color: var(--background-color);
+  padding: 0.5rem;
+  border-radius: 4px;
+  margin-top: 0.5rem;
+  user-select: all;
+  word-break: break-all;
+}
+
+.activation-form {
+  margin-top: 1.5rem;
+}
+
+.activation-form input {
+  text-align: center;
+  letter-spacing: 0.2rem;
+  font-size: 1.2rem;
+}
+
+
+
 </style>
 

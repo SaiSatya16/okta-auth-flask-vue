@@ -42,6 +42,12 @@ enrollFactor(name, data = null) {
   } else {
     return apiClient.post('/mfa', { factor_type: name });
   }
+},
+activateFactor(activationLink, passCode) {
+  return apiClient.put('/mfa', {
+    activation_link: activationLink,
+    pass_code: passCode
+  });
 }
 
 };

@@ -570,8 +570,47 @@ class MFAResource(Resource):
             if response.status_code >= 400:
                 return {"error": response.json()}, response.status_code
             
-            return {"message": f"{factor_type} factor enrolled successfully"}, 201
+            # Return the enrollment response including QR code and activation links
+            enrollment_data = response.json()
+            return enrollment_data, 201
         
+        except Exception as e:
+            return {"error": str(e)}, 400
+        
+    @oidc.require_login
+    def put(self):
+        try:
+            data = request.get_json()
+            activation_link = data.get("activation_link")
+            pass_code = data.get("pass_code")
+            
+            if not activation_link or not pass_code:
+                return {"error": "Activation link and pass code are required"}, 400
+                
+            # Prepare the activation request
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+            }
+            
+            activation_data = {
+                "passCode": pass_code
+            }
+            
+            # Make the activation request
+            response = requests.post(
+                activation_link,
+                headers=headers,
+                json=activation_data,
+                verify=False
+            )
+            
+            if response.status_code >= 400:
+                return {"error": response.json()}, response.status_code
+            
+            return {"message": "Factor activated successfully"}, 200
+            
         except Exception as e:
             return {"error": str(e)}, 400
 
@@ -590,7 +629,31 @@ class LoginStatusResource(Resource):
             }
         except Exception as e:
             return {"loggedIn": False, "error": str(e)}
-
+        
+@app.route('/api/mfa/questions', methods=['GET'])
+@oidc.require_login
+def get_security_questions():
+    try:
+        user_info = oidc.user_getinfo(["sub"])
+        okta_id = user_info.get("sub")
+        
+        # Get security questions from Okta
+        okta_url = f"{os.getenv('OKTA_ORG_URL')}/api/v1/users/{okta_id}/factors/questions"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"SSWS {os.getenv('OKTA_API_TOKEN')}"
+        }
+        
+        response = requests.get(okta_url, headers=headers, verify=False)
+        
+        if response.status_code >= 400:
+            return jsonify({"error": response.json()}), response.status_code
+        
+        return jsonify(response.json()), 200
+    
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 # Add resources to API
 api.add_resource(SignupResource, '/api/signup')
